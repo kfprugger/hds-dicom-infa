@@ -1,3 +1,11 @@
+# .SYNOPSIS
+#   Infrastructure provisioning script for Health Data Services DICOM workloads.
+# .DESCRIPTION
+#   This script provisions Azure Storage Accounts and OneLake folders for DICOM data ingestion to be used in Fabric. Also creates shortcuts in Fabric referencing the storage accounts created in the first part of the script
+# .AUTHOR
+#   Joey Brakefield, Microsoft - jbrakefield@microsoft.com
+
+
 #requires -Modules Az.Accounts, Az.Resources
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(

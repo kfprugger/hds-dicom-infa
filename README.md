@@ -1,196 +1,175 @@
 # HDS DICOM Infrastructure Automation
 
-This repository contains automation for provisioning Azure storage resources and configuring Microsoft Fabric OneLake shortcuts that support the HDS DICOM imaging ingestion pipeline. The primary entry point is the PowerShell script `hds-dicom-infra.ps1`, which orchestrates resource deployment, folder setup, and shortcut wiring from a single run.
+This repository contains a PowerShell automation script and supporting Bicep templates that provision Azure storage resources per facility and prepare Microsoft Fabric lakehouse folders for imaging workloads.
 
-## Workflow Overview
+## Overview
 
-The following diagram illustrates how the automation orchestrates across different platforms:
+The solution orchestrates four responsibilities:
 
-```mermaid
-%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#0078D4','primaryTextColor':'#fff','primaryBorderColor':'#005A9E','lineColor':'#005A9E','secondaryColor':'#50E6FF','tertiaryColor':'#fff'}}}%%
-sequenceDiagram
-    participant User as User/Operator
-    participant PS as PowerShell Script
-    participant CSV as Study CSV File
-    participant Azure as Azure Resource Manager
-    participant Bicep as Bicep Templates
-    participant Storage as Azure Storage Accounts
-    participant OneLake as Microsoft Fabric<br/>OneLake API
-    participant FabricAPI as Microsoft Fabric<br/>Management API
-    participant Lakehouse as Fabric Lakehouse
-    
-    User->>PS: Execute hds-dicom-infra.ps1
-    PS->>CSV: Import Study Definitions
-    CSV-->>PS: Raw STMO List
-    PS->>PS: Sanitize Container Names
-    PS->>PS: Generate Storage Account Names
-    PS->>Azure: Authenticate & Select Subscription
-    Azure-->>PS: Session Confirmed
-    
-    Note over PS,Storage: Phase 1: Infrastructure Deployment (Optional)
-    PS->>Azure: Deploy storageAccounts.bicep
-    Azure->>Bicep: Invoke Template
-    Bicep->>Storage: Create imageBlobAccount
-    Bicep->>Storage: Create imageOperationsAccount (ADLS Gen2)
-    Bicep->>Bicep: Call containers.bicep module
-    Bicep->>Storage: Create Ingest Containers
-    Bicep->>Storage: Create Inventory Containers
-    Bicep->>Storage: Create Operations Containers
-    Bicep->>Storage: Configure Blob Inventory Policies
-    Bicep->>Storage: Assign Fabric Workspace Identity (RBAC)
-    Bicep->>Storage: Assign DICOM Admin Group (RBAC)
-    Storage-->>PS: Deployment Complete
-    
-    Note over PS,Lakehouse: Phase 2: OneLake Folder Structure (Optional)
-    PS->>Azure: Get OneLake Access Token
-    Azure-->>PS: Storage Token
-    PS->>OneLake: Create /Files/Ingest/Imaging/DICOM/<stmo>
-    OneLake->>Lakehouse: Create Directory Structure
-    PS->>OneLake: Create InventoryFiles Subfolders
-    OneLake->>Lakehouse: Create Subdirectories
-    Lakehouse-->>PS: Folders Created
-    
-    Note over PS,Lakehouse: Phase 3: Fabric Shortcuts (Optional)
-    PS->>Azure: Get Fabric API Access Token
-    Azure-->>PS: Fabric Management Token
-    PS->>FabricAPI: List Existing Connections
-    FabricAPI-->>PS: Connection Inventory
-    PS->>FabricAPI: Create/Reuse Blob Connection
-    FabricAPI->>FabricAPI: Configure Workspace Identity Auth
-    FabricAPI-->>PS: Connection ID (Blob)
-    PS->>FabricAPI: Create/Reuse ADLS Connection
-    FabricAPI-->>PS: Connection ID (ADLS)
-    
-    PS->>FabricAPI: List Existing Shortcuts
-    FabricAPI-->>PS: Shortcut Inventory
-    
-    loop For Each Study Container
-        PS->>OneLake: Ensure Path Exists
-        PS->>FabricAPI: Create Inventory Shortcut (<stmo>-inv)
-        FabricAPI->>Lakehouse: Link to Blob Inventory Container
-        Note over FabricAPI,Storage: Points to imageBlobAccount/<stmo>-inv
-    end
-    
-    loop For Each Operations Container
-        PS->>FabricAPI: Create Operations Shortcut (<stmo>)
-        FabricAPI->>Lakehouse: Link to ADLS Operations Container
-        Note over FabricAPI,Storage: Points to imageOperationsAccount/<stmo>
-    end
-    
-    FabricAPI-->>PS: All Shortcuts Created
-    PS-->>User: Orchestration Complete
+1. **Azure authentication** – Verifies an interactive Azure session is already established and halts with guidance if not.
+2. **Facility storage provisioning** – Reads facility and study locations from a CSV file, then deploys storage accounts and blob containers using the `infra/storageAccounts.bicep` template. For every study (STMO) entry, two containers are created: the primary data container and a twin container with an `-inv` suffix that stores that study's blob inventory output.
+3. **Blob inventory governance** – Each study receives a dedicated blob inventory policy that scans block blobs daily, captures all available metadata fields in Apache Parquet format, and writes the results into its associated `-inv` container using a `<primary-container>/` prefix filter.
+4. **Trusted workspace identity** – Automatically assigns the Fabric workspace's managed identity the Storage Blob Data Contributor role on each provisioned storage account.
+4. **Fabric OneLake folder scaffolding** – Creates standardized folder structures in the target Fabric lakehouse via the OneLake REST interface so that each study location has an `InventoryFiles` drop location.
+
+## Prerequisites
+
+- PowerShell 7.2 or later.
+- Azure PowerShell modules `Az.Accounts` and `Az.Resources` (the script imports them automatically when available).
+- Run `Connect-AzAccount` (or equivalent interactive login) before executing the script. The current Azure context must target the tenant and subscription specified by the parameters.
+- The signed-in identity must have Contributor (or higher) permissions on the target subscription/resource group for deploying storage resources and on the Fabric workspace for folder creation.
+- CSV file with at least the following headers: `facilityLocation`, `studyLocation`.
+- Bicep CLI/runtime available on the executing machine (installed with the latest Az PowerShell module or separately).
+
+## Usage
+
+Run the script from the repository root. The example below shows the minimum parameter set; adjust to your environment.
+
+```powershell
+Connect-AzAccount
+pwsh ./hds-dicom-infra.ps1 `
+    -TenantId "<tenant-guid>" `
+    -SubscriptionId "<subscription-guid>" `
+    -ResourceGroupName "rg-hds-prod" `
+    -FacilityCsvPath ".\data\facilityLocations.csv" `
+    -FabricWorkspaceId "<fabric-workspace-guid>" `
+    -HdsBronzeLakehouse "<lakehouse-guid>" `
+    -DicomAdmSecGrpId "<security-group-object-id>"
 ```
 
-### Platform Interactions
+### Full example with all parameters
 
-The automation coordinates across multiple platforms:
+```powershell
+Connect-AzAccount
 
-1. **PowerShell Script** - Central orchestrator
-2. **CSV File** - Source of study location definitions (STMO records)
-3. **Azure Resource Manager** - Handles authentication and resource deployment
-4. **Bicep Templates** - Infrastructure-as-code definitions
-5. **Azure Storage Accounts** - Two accounts are created:
-   - Blob storage account for DICOM ingestion
-   - ADLS Gen2 account for operations and inventory data
-6. **Microsoft Fabric OneLake API** - Creates lakehouse directory structures
-7. **Microsoft Fabric Management API** - Manages connections and shortcuts
-8. **Fabric Lakehouse** - Target for all folder structures and data shortcuts
-
-### Execution Phases
-
-**Phase 1: Infrastructure Deployment** (Optional via `-SkipStorageDeployment`)
-- Creates Azure storage accounts
-- Provisions containers for each study location
-- Configures blob inventory policies
-- Assigns RBAC permissions to Fabric workspace identity and admin group
-
-**Phase 2: OneLake Folder Structure** (Optional via `-SkipFabricFolders`)
-- Creates the lakehouse directory hierarchy
-- Builds paths for each study location under `/Files/Ingest/Imaging/DICOM/<stmo>`
-- Prepares `InventoryFiles` subfolders
-
-**Phase 3: Fabric Shortcuts** (Optional via `-SkipFabricShortcuts`)
-- Creates or reuses Fabric connections to storage accounts
-- Links lakehouse paths to Azure storage containers
-- Establishes inventory shortcuts (blob storage) and operations shortcuts (ADLS Gen2)
-
-## Repository Layout
-
-| Path | Purpose |
-| --- | --- |
-| `hds-dicom-infra.ps1` | Main orchestration script for storage deployment, Fabric folder creation, and shortcut management. |
-| `infra/storageAccounts.bicep` | Bicep template invoked by the script to provision blob and ADLS Gen2 accounts, containers, and RBAC assignments. |
-| `infra/modules/containers.bicep` | Helper module that creates the ingest blob containers defined in the CSV input. |
-| `infra/modules/keyVault.bicep` | Reserved module for future secrets integration (not currently referenced by the script). |
-| `example-fmos-stmos.csv` | Sample study definition CSV consumed by the script to derive container names. |
-| `create-fabric-lh-folders.ps1` | Placeholder for earlier manual operations (the orchestration logic supersedes it). |
-
-## How the Pieces Fit Together
-
-1. **CSV-driven definitions** – The script reads the facility CSV, sanitizes study names, and derives both ingest and inventory container identifiers used across storage and Fabric.
-2. **Infrastructure as code** – Sanitized definitions are passed into `infra/storageAccounts.bicep`, which provisions the two storage accounts, creates the ingest and operations containers, and applies RBAC to the Fabric workspace identity and DICOM admin group.
-3. **Fabric API orchestration** – Using OneLake and Fabric REST APIs, the script ensures the lakehouse directory structure exists, reuses or creates Fabric connections, and builds shortcuts into the storage accounts created earlier.
-4. **Idempotent reruns** – Shortcut indexing, connection lookups, and conflict handling mean the script can be rerun safely to reconcile state without creating duplicates.
-
-## Script Workflow
-
-1. **Parameter validation and logging setup**
-   - Binds required identifiers such as tenant, subscription, Fabric workspace, and lakehouse IDs.
-   - Establishes logging helpers and strict error handling.
-2. **Study metadata ingestion**
-   - `Import-StmoDefinitions` parses the CSV, sanitizes container names, generates inventory suffixes, and produces ordered study objects.
-3. **Storage account name generation**
-   - `Get-SharedStorageAccountName` creates unique blob and operations account names using the provided prefix and location suffix, flagging any trims.
-4. **Azure authentication check**
-   - `Confirm-AzLogin` verifies an existing Az session before continuing; the script then selects the target subscription.
-5. **Resource deployment (optional)**
-   - Unless `-SkipStorageDeployment` is set, `Invoke-StorageDeployment` runs the Bicep template with the study definitions, provisioning:
-     - `imageBlobAccount` (ingest blob storage) plus per-study containers via `modules/containers.bicep`.
-     - `imageOperationsAccount` (ADLS Gen2) with matching containers.
-     - Role assignments for the Fabric workspace managed identity and DICOM admin group.
-6. **OneLake folder preparation (optional)**
-   - If not skipped, `New-FabricInventoryFolders` ensures each study has `/Files/Ingest/Imaging/DICOM/<stmo>/InventoryFiles` directories in the target lakehouse.
-7. **Token acquisition**
-   - `Get-OneLakeAccessToken` retrieves a Storage audience token; `Get-FabricApiAccessToken` retrieves the Fabric management token when shortcuts are managed.
-8. **Inventory shortcuts (blob storage)**
-   - `New-FabricImageShortcuts` reuses or creates a Fabric blob connection to the ingest storage account and generates shortcuts named `<stmo>-inv` pointing to each inventory container under `/Files/Ingest/Imaging/DICOM/<stmo>/InventoryFiles`.
-9. **Operations shortcuts (ADLS Gen2)**
-   - `New-FabricOperationsShortcuts` validates or creates an ADLS Gen2 connection and guarantees a shortcut per container within `/Files/External/Imaging/DICOM/Operations`, verifying the target points to the operations storage account.
-10. **Completion and logging**
-    - The script surfaces detailed INFO/WARN/ERROR entries throughout and ends with a summary notice when orchestration finishes.
-
-## Running the Script
-
-```pwsh
-pwsh ./hds-dicom-infra.ps1 \
-  -TenantId <tenant-guid> \
-  -SubscriptionId <subscription-guid> \
-  -ResourceGroupName <resource-group> \
-  -FacilityCsvPath .\example-fmos-stmos.csv \
-  -hdsWorkspaceName <fabric-workspace-name> \
-  -DicomAdmSecGrpId <aad-group-object-id> \
-  -FabricWorkspaceId <fabric-workspace-guid> \
-  -HdsBronzeLakehouse <lakehouse-item-guid>
+.\hds-dicom-infra.ps1 `
+    -FacilityCsvPath .\example-stmos.csv `
+    -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 `
+    -location westus3 `
+    -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
+    -ResourceGroupName rg-DICOM `
+    -hdsWorkspaceName DICOM-Integration `
+    -PrefixName sa `
+    -LocationSuffix wu3 `
+    -stoBicepTemplatePath '.\infra\storageAccounts.bicep' `
+    -DeploymentName hds-storage-provisioning `
+    -StorageAccountSkuName Standard_LRS `
+    -StorageAccountKind StorageV2 `
+    -FabricWorkspaceId 93acd72f-a23e-4b93-968d-c139600891e7 `
+    -HdsBronzeLakehouse 74f52728-9f52-456f-aeb0-a9e250371087 `
+    -DicomAdmSecGrpId 425d706b-afd7-4044-8110-f5fc4663f5bc `
+    -Debug
 ```
 
-### Prerequisites
-- `Az.Accounts` and `Az.Resources` modules installed and authenticated (`Connect-AzAccount`).
-- Fabric workspace managed identity already provisioned.
-- CSV providing study identifiers aligned with the expected format.
+### Partial execution examples
 
-### Optional Switches
-- `-SkipStorageDeployment` – Skip the Bicep deployment and reuse existing storage accounts.
-- `-SkipFabricFolders` – Skip creation of OneLake directory structure.
-- `-SkipFabricShortcuts` – Skip shortcut creation; useful for infrastructure-only runs.
+Skip storage deployment (Fabric operations only):
 
-## Extending the Automation
+```powershell
+.\hds-dicom-infra.ps1 `
+    -FacilityCsvPath .\example-stmos.csv `
+    -TenantId "<tenant-guid>" `
+    -SubscriptionId "<subscription-guid>" `
+    -ResourceGroupName rg-DICOM `
+    -hdsWorkspaceName DICOM-Integration `
+    -FabricWorkspaceId "<fabric-workspace-guid>" `
+    -HdsBronzeLakehouse "<lakehouse-guid>" `
+    -DicomAdmSecGrpId "<security-group-object-id>" `
+    -SkipStorageDeployment
+```
 
-- **Additional infrastructure**: Expand `infra/storageAccounts.bicep` or its modules with new resources (Key Vault, diagnostic settings) and pass the parameters through `Invoke-StorageDeployment`.
-- **New shortcut targets**: Follow the pattern in `New-FabricImageShortcuts` when adding more data sources; ensure connection reuse logic mirrors the existing helpers (`Get-FabricBlobConnectionId`, `Get-FabricAdlsConnectionId`).
-- **Observability**: Logging is centralized through `Write-Log`; extend it to integrate with external telemetry if desired.
+Skip Fabric folder and shortcut creation (Azure storage only):
 
-Use this README as the single reference for understanding how the PowerShell automation, Bicep templates, and Fabric API interactions come together to provision and wire the DICOM ingestion environment.
+```powershell
+.\hds-dicom-infra.ps1 `
+    -FacilityCsvPath .\example-stmos.csv `
+    -TenantId "<tenant-guid>" `
+    -SubscriptionId "<subscription-guid>" `
+    -ResourceGroupName rg-DICOM `
+    -hdsWorkspaceName DICOM-Integration `
+    -FabricWorkspaceId "<fabric-workspace-guid>" `
+    -HdsBronzeLakehouse "<lakehouse-guid>" `
+    -DicomAdmSecGrpId "<security-group-object-id>" `
+    -SkipFabricFolders `
+    -SkipFabricShortcuts
+```
 
-These are provided as-is and not endorsed by Microsoft. They were from the brain of Joey Brakefield (and Copilot). They are NOT meant to be used in production nor are there any warranties or guarantees associated with their use.
+Key optional switches:
 
-The software is provided under MIT License found in the repo
+- `-PrefixName` / `-LocationSuffix`: override the storage account naming convention (default `sa` and `wu3`).
+- `-GlobalTags @{ Environment = 'prod'; Workstream = 'dicom' }` : merge custom tags into every storage account.
+- `-TrustedWorkspacePrincipalType`: change the principal type used when assigning the Fabric workspace's managed identity (defaults to `ServicePrincipal`).
+- `-SkipStorageDeployment` or `-SkipFabricFolders`: execute only parts of the workflow.
+- `-WhatIf`: preview the Bicep deployment without applying changes.
+
+## CSV expectations
+
+Each row must map a facility to one study location. Duplicate rows per facility are allowed and deduplicated per study. Study locations are sanitized to meet Azure Storage naming requirements (lowercase, no spaces). Facilities are truncated as needed to honor the 24-character storage account limit with the configured prefix/suffix.
+
+## File structure
+
+- `hds-dicom-infra.ps1` – Main PowerShell orchestration script.
+- `infra/storageAccounts.bicep` – Resource group–scoped Bicep template that provisions storage accounts and blob containers.
+- `infra/modules/containers.bicep` – Child module invoked by the main template to create blob containers per facility.
+
+## Required Permissions
+
+The executing identity must hold the following roles and permissions to run the complete script.
+
+### Azure RBAC
+
+| Role | Scope | Purpose |
+|------|-------|---------|
+| **Contributor** | Resource Group | Deploy storage accounts, containers, and blob services via Bicep |
+| **User Access Administrator** | Resource Group | Create role assignments for the Fabric workspace identity and DICOM admin security group |
+
+> **Tip:** The **Owner** role at the Resource Group level includes both Contributor and User Access Administrator.
+
+### Microsoft Entra ID
+
+| Permission | Purpose |
+|------------|---------|
+| `Directory.Read.All` or **Directory Readers** role | Required for `Get-AzADServicePrincipal` to resolve the Fabric workspace managed identity by display name |
+
+### Microsoft Fabric
+
+| Role / Permission | Scope | Purpose |
+|-------------------|-------|---------|
+| **Workspace Admin** or **Member** | Target Fabric Workspace | Create connections, shortcuts, and directories in the Lakehouse |
+| `Connection.ReadWrite.All` | Tenant (delegated) | Create new Fabric connections for Azure Blob Storage and ADLS Gen2 |
+| `Connection.Read.All` | Tenant (delegated) | Query existing connections to avoid duplicates |
+
+### API Token Scopes
+
+The script acquires delegated access tokens for the following resources:
+
+| Resource | Purpose |
+|----------|---------|
+| `https://api.fabric.microsoft.com/.default` | Fabric management API calls (connections, shortcuts, metadata) |
+| `https://storage.azure.com/.default` | OneLake directory operations via the DFS endpoint |
+
+### Roles Assigned by the Script
+
+These roles are created during deployment and do **not** need to be held by the executing user:
+
+| Role | Assigned To | Scope |
+|------|-------------|-------|
+| **Storage Blob Data Contributor** | Fabric Workspace Managed Identity | Both storage accounts |
+| **Storage Blob Data Contributor** | DICOM Admin Security Group | Both storage accounts |
+
+### Summary
+
+| Category | Required Role / Permission | Scope |
+|----------|----------------------------|-------|
+| Azure RBAC | Owner **or** (Contributor + User Access Administrator) | Resource Group |
+| Entra ID | Directory Readers **or** `Directory.Read.All` | Tenant |
+| Fabric | Workspace Admin or Member | Target Workspace |
+| Fabric API | `Connection.ReadWrite.All`, `Connection.Read.All` | Tenant (delegated auth) |
+
+## References
+
+- Azure Storage account naming rules: <https://learn.microsoft.com/azure/storage/common/storage-account-overview#storage-account-names>
+- OneLake REST directory creation (API parity with ADLS): <https://learn.microsoft.com/fabric/onelake/onelake-api-parity>
+- Fabric folder REST API (preview): <https://learn.microsoft.com/rest/api/fabric/core/folders/create-folder>
+
+These references guided the authentication, storage, and OneLake integration strategies used in the solution.

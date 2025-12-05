@@ -1,10 +1,25 @@
-# .SYNOPSIS
-#   Infrastructure provisioning script for Health Data Services DICOM workloads.
-# .DESCRIPTION
-#   This script provisions Azure Storage Accounts and OneLake folders for DICOM data ingestion to be used in Fabric. Also creates shortcuts in Fabric referencing the storage accounts created in the first part of the script
-# .AUTHOR
-#   Joey Brakefield, Microsoft - jbrakefield@microsoft.com
 
+
+# .\hds-dicom-infra.ps1 
+# `-FacilityCsvPath .\example-stmos.csv `
+# -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 
+# -location westus3 `
+# -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f 
+# -ResourceGroupName rg-DICOM `
+# -hdsWorkspaceName DICOM-Integration `
+# -PrefixName sa `
+# -LocationSuffix wu3 `
+# -stoBicepTemplatePath '.\\infra\\storageAccounts.bicep' `
+# -DeploymentName hds-storage-provisioning `
+# -StorageAccountSkuName Standard_LRS `
+# -StorageAccountKind StorageV2 `
+# -FabricWorkspaceId 93acd72f-a23e-4b93-968d-c139600891e7 `
+# -HdsBronzeLakehouse 74f52728-9f52-456f-aeb0-a9e250371087 `
+# -Debug `
+# -DicomAdmSecGrpId 425d706b-afd7-4044-8110-f5fc4663f5bc `
+# -SkipStorageDeployment `
+# -SkipFabricFolders `
+# -SkipFabricShortcuts 
 
 #requires -Modules Az.Accounts, Az.Resources
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -27,7 +42,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$hdsWorkspaceName = 'DICOM-Integration', # default workspace name
 
-    [string]$PrefixName = 'sa',
+    [string]$PrefixName = 'sa', # storage account name prefix
 
     [string]$LocationSuffix = 'wu3', #typically should be the short form of the location. I will create a mapping table later.
 
@@ -59,11 +74,11 @@ param(
 
     [hashtable]$GlobalTags = @{},
 
-    [switch]$SkipStorageDeployment,
+    [switch]$SkipStorageDeployment, # explain to skip the Bicep deployment of storage accounts and containers
 
-    [switch]$SkipFabricFolders,
+    [switch]$SkipFabricFolders, # explain to skip the creation of Fabric folders portion of the script
 
-    [switch]$SkipFabricShortcuts
+    [switch]$SkipFabricShortcuts # explain to skip the creation of Fabric shortcuts portion of the script
 
 )
 
@@ -1255,8 +1270,8 @@ function New-FabricAdlsConnection {
         [Parameter(Mandatory = $true)][string]$WorkspaceId,
         [Parameter(Mandatory = $true)][string]$AccessToken,
         [Parameter(Mandatory = $true)][string]$DisplayName,
-    [Parameter(Mandatory = $true)][string]$StorageLocation,
-    [string]$ContainerSubpath
+        [Parameter(Mandatory = $true)][string]$StorageLocation,
+        [Parameter(Mandatory = $true)][string]$ContainerSubpath
     )
 
     $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
@@ -1291,7 +1306,7 @@ function New-FabricAdlsConnection {
         $accountHost = ($accountUrl -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', '').Trim('/')
     }
 
-    $containerSubpathString = if ($PSBoundParameters.ContainsKey('ContainerSubpath')) { [string]$ContainerSubpath } else { '' }
+    $containerSubpathString = [string]$ContainerSubpath
     $containerPathTrimmed = if ([string]::IsNullOrWhiteSpace($containerSubpathString)) { '' } else { $containerSubpathString.Trim('/') }
 
     $rawSegments = if ([string]::IsNullOrWhiteSpace($containerPathTrimmed)) {
@@ -1316,15 +1331,12 @@ function New-FabricAdlsConnection {
     $fileSystemName = if ($segmentCount -gt 0) { $containerSegments[0] } else { $null }
     $relativePath = if ($segmentCount -gt 1) { [string]::Join('/', $containerSegments[1..($segmentCount - 1)]) } else { $null }
     $fullPathRelative = if ($segmentCount -gt 0) { [string]::Join('/', $containerSegments) } else { $null }
-    $isRootRequest = [string]::IsNullOrWhiteSpace($containerPathTrimmed)
-
-    if (-not $fileSystemName -and -not $isRootRequest) {
+    if (-not $fileSystemName) {
         throw "Container subpath '$ContainerSubpath' did not resolve to an ADLS Gen2 file system for connection creation."
     }
 
-    $pathWithLeadingSlash = if ($fullPathRelative) { "/$fullPathRelative" } else { '/' }
-    $fullPathAbsolute = if ($fullPathRelative) { "$accountUrl/$fullPathRelative" } else { $accountUrl }
-    $pathParameterValue = if ($fullPathRelative) { $fullPathRelative } else { '/' }
+    $pathWithLeadingSlash = "/$fullPathRelative"
+    $fullPathAbsolute = "$accountUrl/$fullPathRelative"
 
     $connectionType = 'AdlsGen2'
     $creationMethodName = 'AdlsGen2'
@@ -1369,37 +1381,33 @@ function New-FabricAdlsConnection {
                     if ($compactName -match 'pathuri|pathurl|urlpath') {
                         $value = $fullPathAbsolute
                     } elseif ($compactName -match 'fullpath') {
-                        $value = $pathParameterValue
+                        $value = if ($fullPathRelative) { $fullPathRelative } else { $pathWithLeadingSlash }
                     } elseif ($compactName -eq 'path') {
-                        $value = $pathParameterValue
+                        if (-not [string]::IsNullOrWhiteSpace($fullPathRelative)) {
+                            $value = $fullPathRelative
+                        } else {
+                            $value = $pathWithLeadingSlash
+                        }
                     } elseif ($compactName -match 'server|host') {
                         $value = $accountHost
                     } elseif ($compactName -match 'account|endpoint|url|location|dfs') {
                         $value = $accountUrl
                     } elseif ($compactName -match 'filesystem|container|root') {
-                        $value = if ($fileSystemName) { $fileSystemName } elseif ($isRootRequest) { '/' } else { $null }
+                        $value = $fileSystemName
                     } elseif ($compactName -match 'subpath|relativepath|folder|directory') {
                         if (-not [string]::IsNullOrWhiteSpace($relativePath)) {
                             $value = $relativePath
-                        } elseif ($isRootRequest) {
-                            $value = '/'
                         } elseif (-not [string]::IsNullOrWhiteSpace($fileSystemName)) {
                             $value = ''
                         }
                     }
 
-                    if ($parameter.required -and [string]::IsNullOrWhiteSpace($value) -and -not $isRootRequest) {
+                    if ($parameter.required -and [string]::IsNullOrWhiteSpace($value)) {
                         Write-Log "Unable to auto-map required parameter '$paramName'. Metadata: $(($parameter | ConvertTo-Json -Compress -Depth 3))" 'WARN'
                         throw "Unable to map required parameter '$paramName' for ADLS Gen2 connection creation."
                     }
 
-                    $shouldAddParameter = -not [string]::IsNullOrWhiteSpace($value)
-                    if (-not $shouldAddParameter -and $isRootRequest -and ($compactName -match 'filesystem|container|root|subpath|relativepath|folder|directory')) {
-                        $shouldAddParameter = $true
-                        $value = if ($compactName -match 'filesystem|container|root') { '/' } else { '/' }
-                    }
-
-                    if ($shouldAddParameter) {
+                    if (-not [string]::IsNullOrWhiteSpace($value)) {
                         $parameterObjects += @{
                             name    = $paramName
                             dataType = if ($parameter.PSObject.Properties['dataType']) { [string]$parameter.dataType } else { 'Text' }
@@ -1442,16 +1450,14 @@ function New-FabricAdlsConnection {
 
             if ($paramName) {
                 if ($paramName.Equals('path', [System.StringComparison]::OrdinalIgnoreCase)) {
-                    $valueCandidate = $pathParameterValue
+                    $valueCandidate = if ($fullPathRelative) { $fullPathRelative } else { $pathWithLeadingSlash.TrimStart('/') }
                 } elseif ($paramName.Equals('server', [System.StringComparison]::OrdinalIgnoreCase)) {
                     $valueCandidate = $accountHost
                 } elseif ($paramName -match 'filesystem|container|root') {
-                    $valueCandidate = if ($fileSystemName) { $fileSystemName } elseif ($isRootRequest) { '/' } else { $fileSystemName }
+                    $valueCandidate = $fileSystemName
                 } elseif ($paramName -match 'subpath|relativepath|folder|directory') {
                     if (-not [string]::IsNullOrWhiteSpace($relativePath)) {
                         $valueCandidate = $relativePath
-                    } elseif ($isRootRequest) {
-                        $valueCandidate = '/'
                     } elseif (-not [string]::IsNullOrWhiteSpace($fileSystemName)) {
                         $valueCandidate = ''
                     }
@@ -1465,12 +1471,12 @@ function New-FabricAdlsConnection {
     if ($parameterObjects.Length -eq 0) {
         $parameterObjects = @(
             @{ name = 'server'; dataType = 'Text'; value = $accountHost }
-            @{ name = 'path';   dataType = 'Text'; value = $pathParameterValue }
+            @{ name = 'path';   dataType = 'Text'; value = if ($fullPathRelative) { $fullPathRelative } else { $pathWithLeadingSlash.TrimStart('/') } }
         )
     }
 
     $credentialDetails = @{
-        singleSignOnType      = 'None'
+        singleSignOnType      = 'ManagedIdentity'
         connectionEncryption  = $encryptionOption
         skipTestConnection    = $false
         credentials = @{
@@ -1559,205 +1565,6 @@ function Get-FabricShortcutByName {
     return $null
 }
 
-function Get-FabricShortcutIndex {
-    param(
-        [Parameter(Mandatory = $true)][string]$Endpoint,
-        [Parameter(Mandatory = $true)][string]$AccessToken,
-        [Parameter(Mandatory = $true)][string]$WorkspaceId,
-        [Parameter(Mandatory = $true)][string]$LakehouseId
-    )
-
-    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
-    $workspaceIdEncoded = [Uri]::EscapeDataString($WorkspaceId)
-    $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
-    $uri = "$($Endpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts"
-
-    try {
-        $result = Invoke-FabricApiRequest -Method 'Get' -Uri $uri -Headers $headers -Description "List Fabric shortcuts for lakehouse '$LakehouseId'"
-    } catch {
-        Write-Log "Unable to index Fabric shortcuts for lakehouse '$LakehouseId': $($_.Exception.Message)" 'WARN'
-        return [pscustomobject]@{
-            Success = $false
-            Items   = @()
-            ByName  = @{}
-            ByPath  = @{}
-        }
-    }
-
-    $response = $result.Response
-    $items = @()
-    if ($null -ne $response) {
-        if ($response.PSObject.Properties['value']) {
-            $items = @($response.value)
-        } elseif ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
-            $items = @($response)
-        } else {
-            $items = @($response)
-        }
-    }
-
-    $byName = @{}
-    $byPath = @{}
-
-    foreach ($item in $items) {
-        if (-not $item) {
-            continue
-        }
-
-        $nameValue = if ($item.PSObject.Properties['name']) { [string]$item.name } else { $null }
-        if (-not [string]::IsNullOrWhiteSpace($nameValue)) {
-            $byName[$nameValue.ToLowerInvariant()] = $item
-        }
-
-        $pathValue = if ($item.PSObject.Properties['path']) { [string]$item.path } else { $null }
-        if (-not [string]::IsNullOrWhiteSpace($pathValue)) {
-            $byPath[$pathValue.ToLowerInvariant()] = $item
-        }
-    }
-
-    return [pscustomobject]@{
-        Success = $true
-        Items   = $items
-        ByName  = $byName
-        ByPath  = $byPath
-    }
-}
-
-function Remove-FabricShortcut {
-    param(
-        [Parameter(Mandatory = $true)][string]$Endpoint,
-        [Parameter(Mandatory = $true)][string]$AccessToken,
-        [Parameter(Mandatory = $true)][string]$WorkspaceId,
-        [Parameter(Mandatory = $true)][string]$LakehouseId,
-        [Parameter(Mandatory = $true)][string]$ShortcutId,
-        [string]$ShortcutName
-    )
-
-    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
-    $workspaceIdEncoded = [Uri]::EscapeDataString($WorkspaceId)
-    $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
-    $shortcutIdEncoded = [Uri]::EscapeDataString($ShortcutId)
-    $uri = "$($Endpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts/$shortcutIdEncoded"
-
-    $displayName = if ([string]::IsNullOrWhiteSpace($ShortcutName)) { $ShortcutId } else { $ShortcutName }
-    Write-Log "Deleting Fabric shortcut '$displayName' (ID: $ShortcutId)." 'INFO'
-
-    try {
-        Invoke-FabricApiRequest -Method 'Delete' -Uri $uri -Headers $headers -Description "Delete Fabric shortcut '$displayName'" | Out-Null
-        return $true
-    } catch {
-        $caughtError = $_
-        Write-Log "Failed to delete Fabric shortcut '$displayName': $($caughtError.Exception.Message)" 'ERROR'
-        return $false
-    }
-}
-
-function Get-FabricBlobConnectionId {
-    param(
-        [Parameter(Mandatory = $true)][string]$FabricEndpoint,
-        [Parameter(Mandatory = $true)][string]$WorkspaceId,
-        [Parameter(Mandatory = $true)][string]$FabricAccessToken,
-        [Parameter(Mandatory = $true)][string]$BlobConnectionDisplayName,
-        [Parameter(Mandatory = $true)][string]$BlobEndpoint,
-        [string]$DefaultContainerName,
-        [switch]$SkipExistingDetailLog
-    )
-
-    $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName -WorkspaceId $WorkspaceId
-
-    if ($existingBlobConnection -and $existingBlobConnection.PSObject.Properties['id']) {
-        $connectionId = [string]$existingBlobConnection.id
-        Write-Log "Found existing Fabric blob connection '$BlobConnectionDisplayName' (ID: $connectionId)." 'INFO'
-
-        if (-not $SkipExistingDetailLog.IsPresent) {
-            try {
-                if ($existingBlobConnection.PSObject.Properties['connectionDetails']) {
-                    $connectionDetailsJson = $existingBlobConnection.connectionDetails | ConvertTo-Json -Depth 5 -Compress
-                    Write-Log "Existing connection details: $connectionDetailsJson" 'DEBUG'
-                }
-            } catch {
-                Write-Log "Unable to serialize existing connection details for '$BlobConnectionDisplayName': $($_.Exception.Message)" 'DEBUG'
-            }
-        }
-    } else {
-        $newConnectionParams = @{
-            Endpoint        = $FabricEndpoint
-            WorkspaceId     = $WorkspaceId
-            AccessToken     = $FabricAccessToken
-            DisplayName     = $BlobConnectionDisplayName
-            StorageLocation = $BlobEndpoint
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) {
-            $newConnectionParams['DefaultContainerName'] = $DefaultContainerName
-        }
-
-        $connectionId = New-FabricBlobConnection @newConnectionParams
-    }
-
-    if ([string]::IsNullOrWhiteSpace($connectionId)) {
-        throw "Unable to resolve a Fabric connection ID for '$BlobConnectionDisplayName'."
-    }
-
-    return $connectionId
-}
-
-function Get-FabricAdlsConnectionId {
-    param(
-        [Parameter(Mandatory = $true)][string]$FabricEndpoint,
-        [Parameter(Mandatory = $true)][string]$WorkspaceId,
-        [Parameter(Mandatory = $true)][string]$FabricAccessToken,
-        [Parameter(Mandatory = $true)][string]$AdlsConnectionDisplayName,
-        [Parameter(Mandatory = $true)][string]$AdlsEndpoint,
-        [string]$DefaultContainerSubpath,
-        [switch]$SkipExistingDetailLog
-    )
-
-    $existingAdlsConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $AdlsConnectionDisplayName -WorkspaceId $WorkspaceId
-    if (-not $existingAdlsConnection) {
-        $existingAdlsConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $AdlsConnectionDisplayName
-        if ($existingAdlsConnection) {
-            Write-Log "Found tenant-scoped Fabric ADLS connection '$AdlsConnectionDisplayName'." 'INFO'
-        }
-    }
-
-    if ($existingAdlsConnection -and $existingAdlsConnection.PSObject.Properties['id']) {
-        $connectionId = [string]$existingAdlsConnection.id
-        Write-Log "Found existing Fabric ADLS connection '$AdlsConnectionDisplayName' (ID: $connectionId)." 'INFO'
-
-        if (-not $SkipExistingDetailLog.IsPresent) {
-            try {
-                if ($existingAdlsConnection.PSObject.Properties['connectionDetails']) {
-                    $connectionDetailsJson = $existingAdlsConnection.connectionDetails | ConvertTo-Json -Depth 5 -Compress
-                    Write-Log "Existing ADLS connection details: $connectionDetailsJson" 'DEBUG'
-                }
-            } catch {
-                Write-Log "Unable to serialize existing ADLS connection details for '$AdlsConnectionDisplayName': $($_.Exception.Message)" 'DEBUG'
-            }
-        }
-    } else {
-        $newConnectionParams = @{
-            Endpoint        = $FabricEndpoint
-            WorkspaceId     = $WorkspaceId
-            AccessToken     = $FabricAccessToken
-            DisplayName     = $AdlsConnectionDisplayName
-            StorageLocation = $AdlsEndpoint
-        }
-
-        if ($PSBoundParameters.ContainsKey('DefaultContainerSubpath')) {
-            $newConnectionParams['ContainerSubpath'] = $DefaultContainerSubpath
-        }
-
-        $connectionId = New-FabricAdlsConnection @newConnectionParams
-    }
-
-    if ([string]::IsNullOrWhiteSpace($connectionId)) {
-        throw "Unable to resolve a Fabric connection ID for '$AdlsConnectionDisplayName'."
-    }
-
-    return $connectionId
-}
-
 function New-FabricImageShortcuts {
     param(
         [Parameter(Mandatory = $true)][string]$OneLakeEndpoint,
@@ -1772,7 +1579,7 @@ function New-FabricImageShortcuts {
     )
 
     if (-not $StmoDefinitions -or $StmoDefinitions.Count -eq 0) {
-        Write-Log 'No STMO definitions provided for inventory shortcut creation.' 'WARN'
+        Write-Log 'No STMO definitions provided for image shortcut creation.' 'WARN'
         return
     }
 
@@ -1784,72 +1591,63 @@ function New-FabricImageShortcuts {
     }
 
     $blobEndpoint = "https://$BlobStorageAccountName.blob.core.windows.net"
-    $defaultDefinition = $StmoDefinitions | Select-Object -First 1
-    $defaultInventoryContainerName = if ($defaultDefinition -and $defaultDefinition.PSObject.Properties['InventoryContainerName']) {
-        [string]$defaultDefinition.InventoryContainerName
-    } elseif ($defaultDefinition -and $defaultDefinition.PSObject.Properties['ContainerName']) {
-        [string]$defaultDefinition.ContainerName
+    $defaultContainer = $StmoDefinitions | Select-Object -First 1
+    $defaultContainerName = if ($defaultContainer -and $defaultContainer.PSObject.Properties['ContainerName']) { [string]$defaultContainer.ContainerName } else { $null }
+
+    $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName -WorkspaceId $WorkspaceId
+    if (-not $existingBlobConnection) {
+        $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName
+        if ($existingBlobConnection) {
+            Write-Log "Found tenant-scoped Fabric blob connection '$BlobConnectionDisplayName'." 'INFO'
+        }
+    }
+    if ($existingBlobConnection -and $existingBlobConnection.PSObject.Properties['id']) {
+        $connectionId = [string]$existingBlobConnection.id
+        Write-Log "Found existing Fabric blob connection '$BlobConnectionDisplayName' (ID: $connectionId)." 'INFO'
+
+        try {
+            if ($existingBlobConnection.PSObject.Properties['connectionDetails']) {
+                $connectionDetailsJson = $existingBlobConnection.connectionDetails | ConvertTo-Json -Depth 5 -Compress
+                Write-Log "Existing connection details: $connectionDetailsJson" 'DEBUG'
+            }
+        } catch {
+            Write-Log "Unable to serialize existing connection details for '$BlobConnectionDisplayName': $($_.Exception.Message)" 'DEBUG'
+        }
     } else {
-        $null
+        $connectionId = New-FabricBlobConnection -Endpoint $FabricEndpoint -WorkspaceId $WorkspaceId -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName -StorageLocation $blobEndpoint -DefaultContainerName $defaultContainerName
     }
 
-    $connectionId = Get-FabricBlobConnectionId -FabricEndpoint $FabricEndpoint -WorkspaceId $WorkspaceId -FabricAccessToken $FabricAccessToken -BlobConnectionDisplayName $BlobConnectionDisplayName -BlobEndpoint $blobEndpoint -DefaultContainerName $defaultInventoryContainerName
-
-    $shortcutIndex = Get-FabricShortcutIndex -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
-    if (-not $shortcutIndex.Success) {
-        Write-Log 'Unable to evaluate existing lakehouse shortcuts; skipping inventory shortcut creation to avoid conflicts.' 'WARN'
-        return
+    if ([string]::IsNullOrWhiteSpace($connectionId)) {
+        throw "Unable to resolve a Fabric connection ID for '$BlobConnectionDisplayName'."
     }
-
-    $existingByName = if ($shortcutIndex.ByName) { $shortcutIndex.ByName } else { @{} }
-    $existingByPath = if ($shortcutIndex.ByPath) { $shortcutIndex.ByPath } else { @{} }
 
     foreach ($definition in $StmoDefinitions) {
         $containerName = [string]$definition.ContainerName
-        $inventoryContainerName = if ($definition.PSObject.Properties['InventoryContainerName']) { [string]$definition.InventoryContainerName } else { $null }
-
         if ([string]::IsNullOrWhiteSpace($containerName)) {
             Write-Log 'Encountered STMO definition without a container name; skipping.' 'WARN'
             continue
         }
 
-        if ([string]::IsNullOrWhiteSpace($inventoryContainerName)) {
-            Write-Log "STMO '$containerName' does not have an inventory container name; skipping inventory shortcut creation." 'WARN'
-            continue
-        }
-
-        $pathSegments = @($baseSegments + $containerName + 'InventoryFiles')
+        $pathSegments = @($baseSegments + $containerName)
         if ($pathSegments.Count -gt 0) {
             New-LakehouseDirectoryPath -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $pathSegments -AccessToken $OneLakeAccessToken
         }
 
-        $shortcutPath = "Files/Ingest/Imaging/DICOM/$containerName/InventoryFiles"
-        $shortcutName = "$containerName-inv"
+        $shortcutPath = "Files/Ingest/Imaging/DICOM/$containerName"
+        $existingShortcut = Get-FabricShortcutByName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $containerName -ShortcutPath $shortcutPath
 
-        $shortcutPathKey = $shortcutPath.ToLowerInvariant()
-        $shortcutNameKey = $shortcutName.ToLowerInvariant()
-
-        if ($existingByPath.ContainsKey($shortcutPathKey)) {
-            $existingEntry = $existingByPath[$shortcutPathKey]
-            $existingName = if ($existingEntry -and $existingEntry.PSObject.Properties['name']) { [string]$existingEntry.name } else { '<unknown>' }
-            Write-Log "Inventory shortcut path '$shortcutPath' already exists and is mapped to '$existingName'; skipping creation." 'INFO'
-            continue
-        }
-
-        if ($existingByName.ContainsKey($shortcutNameKey)) {
-            $existingEntryByName = $existingByName[$shortcutNameKey]
-            $existingPath = if ($existingEntryByName -and $existingEntryByName.PSObject.Properties['path']) { [string]$existingEntryByName.path } else { '<unknown>' }
-            Write-Log "Inventory shortcut name '$shortcutName' already exists at path '$existingPath'; skipping creation." 'INFO'
+        if ($existingShortcut) {
+            Write-Log "Image shortcut '$containerName' already exists at '$shortcutPath'." 'INFO'
             continue
         }
 
         $body = @{
             path = $shortcutPath
-            name = $shortcutName
+            name = $containerName
             target = @{
                 azureBlobStorage = @{
                     location = $blobEndpoint
-                    subpath  = "/$inventoryContainerName"
+                    subpath  = "/$containerName"
                     connectionId = $connectionId
                 }
             }
@@ -1861,60 +1659,17 @@ function New-FabricImageShortcuts {
         $uri = "$($FabricEndpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts?shortcutConflictPolicy=Abort"
 
         try {
-            $creationResult = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create inventory shortcut '$shortcutName'"
-            Write-Log "Created Fabric inventory shortcut '$shortcutName' -> '$blobEndpoint/$inventoryContainerName'." 'INFO'
-
-            if ($creationResult -and $creationResult.Response) {
-                $createdShortcut = $creationResult.Response
-                if ($createdShortcut.PSObject.Properties['name']) {
-                    $existingByName[$shortcutNameKey] = $createdShortcut
-                }
-                if ($createdShortcut.PSObject.Properties['path']) {
-                    $existingByPath[$shortcutPathKey] = $createdShortcut
-                }
-            } else {
-                $existingByName[$shortcutNameKey] = $true
-                $existingByPath[$shortcutPathKey] = $true
-            }
+            Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create image shortcut '$containerName'"
+            Write-Log "Created Fabric image shortcut '$containerName' -> '$blobEndpoint/$containerName'." 'INFO'
         } catch {
-            $caughtError = $_
-            $handledConflict = $false
-
-            if ($caughtError.Exception -and $caughtError.Exception.Response) {
-                $response = $caughtError.Exception.Response
-                $statusCodeValue = $null
-
-                if ($response -is [System.Net.Http.HttpResponseMessage]) {
-                    $statusCodeValue = [int]$response.StatusCode
-                } elseif ($response.PSObject.Properties['StatusCode']) {
-                    $statusCodeRaw = $response.StatusCode
-                    try {
-                        $statusCodeValue = [int]$statusCodeRaw
-                    } catch {
-                        if ($statusCodeRaw -and $statusCodeRaw.PSObject.Properties['value__']) {
-                            $statusCodeValue = [int]$statusCodeRaw.value__
-                        }
-                    }
-                }
-
-                if ($statusCodeValue -eq 409) {
-                    Write-Log "Inventory shortcut '$shortcutName' already exists according to Fabric API (HTTP 409). Skipping creation." 'WARN'
-                    $existingByPath[$shortcutPathKey] = $true
-                    $existingByName[$shortcutNameKey] = $true
-                    $handledConflict = $true
-                }
-            }
-
-            if (-not $handledConflict) {
-                $errorMessage = "Failed to create inventory shortcut '$shortcutName': $($caughtError.Exception.Message)"
-                Write-Log $errorMessage 'ERROR'
-                throw
-            }
+            $errorMessage = "Failed to create image shortcut '$containerName': $($_.Exception.Message)"
+            Write-Log $errorMessage 'ERROR'
+            throw
         }
     }
 }
 
-function New-FabricOperationsShortcuts {
+function New-FabricInventoryShortcuts {
     param(
         [Parameter(Mandatory = $true)][string]$OneLakeEndpoint,
         [Parameter(Mandatory = $true)][string]$FabricEndpoint,
@@ -1927,132 +1682,31 @@ function New-FabricOperationsShortcuts {
         [Parameter(Mandatory = $true)][string]$InventoryStorageAccountName
     )
 
-    $normalizedOperationsPath = $OperationsPath.Trim()
-    if (-not $normalizedOperationsPath.StartsWith('/')) {
-        $normalizedOperationsPath = "/$normalizedOperationsPath"
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($LakehouseOperationsPath) -and -not $normalizedOperationsPath.Equals($LakehouseOperationsPath, [System.StringComparison]::OrdinalIgnoreCase)) {
-        $message = "Operations shortcut path '$normalizedOperationsPath' does not match required lakehouse path '$LakehouseOperationsPath'."
-        Write-Log $message 'ERROR'
-        throw $message
-    }
-
     $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
-    $operationsSegments = Get-LakehousePathSegments -FullPath $normalizedOperationsPath
+    $operationsSegments = Get-LakehousePathSegments -FullPath $OperationsPath
     New-LakehouseDirectoryPath -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $operationsSegments -AccessToken $OneLakeAccessToken
 
-    $shortcutPath = $normalizedOperationsPath.TrimStart('/')
+    $shortcutPath = $OperationsPath.TrimStart('/')
     if ([string]::IsNullOrWhiteSpace($shortcutPath)) {
         Write-Log 'Lakehouse shortcut path resolved to an empty string; skipping shortcut creation.' 'WARN'
         return
     }
 
-    $operationsEndpoint = "https://$InventoryStorageAccountName.dfs.core.windows.net"
-    $operationsConnectionDisplayName = "fab-$InventoryStorageAccountName-adls-conn"
-    $operationsConnectionId = Get-FabricAdlsConnectionId -FabricEndpoint $FabricEndpoint -WorkspaceId $WorkspaceId -FabricAccessToken $FabricAccessToken -AdlsConnectionDisplayName $operationsConnectionDisplayName -AdlsEndpoint $operationsEndpoint -DefaultContainerSubpath '/'
-    Write-Log "Using Fabric ADLS connection '$operationsConnectionDisplayName' (ID: $operationsConnectionId) for operations shortcuts." 'INFO'
-
-    $shortcutIndex = Get-FabricShortcutIndex -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
-    if (-not $shortcutIndex.Success) {
-        Write-Log 'Unable to evaluate existing lakehouse shortcuts; skipping operations shortcut creation to avoid conflicts.' 'WARN'
-        return
-    }
-
-    $shortcutItems = if ($shortcutIndex.Items) { @($shortcutIndex.Items) } else { @() }
-    $processedContainers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    $loggedConflicts = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-
     foreach ($definition in $StmoDefinitions) {
         $operationsContainer = $definition.ContainerName
-        if ([string]::IsNullOrWhiteSpace($operationsContainer)) {
-            Write-Log 'Encountered STMO definition without a container name for operations shortcut; skipping.' 'WARN'
-            continue
-        }
-
-        if (-not $processedContainers.Add($operationsContainer)) {
-            Write-Log "Operations shortcut for container '$operationsContainer' already processed; skipping duplicate definition." 'INFO'
-            continue
-        }
-
+        $displayName = "$InventoryStorageAccountName-$operationsContainer-workspace-mi"
+        $storageLocation = "https://$InventoryStorageAccountName.dfs.core.windows.net"
         $containerSubpath = "/$operationsContainer"
 
+        $connectionId = New-FabricAdlsConnection -Endpoint $FabricEndpoint -WorkspaceId $WorkspaceId -AccessToken $FabricAccessToken -DisplayName $displayName -StorageLocation $storageLocation -ContainerSubpath $containerSubpath
+
         $shortcutName = $operationsContainer
-        $shortcutNameKey = $shortcutName.ToLowerInvariant()
-        $targetPath = "/$shortcutPath"
-
-        $existingShortcut = $shortcutItems | Where-Object {
-            $_ -and $_.PSObject.Properties['name'] -and $_.PSObject.Properties['path'] -and
-            [string]::Equals([string]$_.name, $shortcutName, [System.StringComparison]::OrdinalIgnoreCase) -and
-            [string]::Equals([string]$_.path, $targetPath, [System.StringComparison]::OrdinalIgnoreCase)
-        } | Select-Object -First 1
-
-        $conflictingShortcuts = $shortcutItems | Where-Object {
-            $_ -and $_.PSObject.Properties['name'] -and [string]::Equals([string]$_.name, $shortcutName, [System.StringComparison]::OrdinalIgnoreCase) -and (
-                -not ($_.PSObject.Properties['path'] -and [string]::Equals([string]$_.path, $targetPath, [System.StringComparison]::OrdinalIgnoreCase))
-            )
-        }
-
-        foreach ($conflict in $conflictingShortcuts) {
-            $conflictPath = if ($conflict.PSObject.Properties['path']) { [string]$conflict.path } else { '<unknown>' }
-            if ($loggedConflicts.Add("$shortcutNameKey|$conflictPath")) {
-                Write-Log "Found shortcut '$shortcutName' at non-operations path '$conflictPath'; leaving in place." 'INFO'
-            }
-        }
+        $existingShortcut = Get-FabricShortcutByName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $shortcutName -ShortcutPath $shortcutPath
 
         if ($existingShortcut) {
-            $targetObject = $null
-            if ($existingShortcut.PSObject.Properties['target']) {
-                $targetObject = $existingShortcut.target
-            }
-
-            $adlsTarget = $null
-            if ($targetObject -and $targetObject.PSObject.Properties['adlsGen2']) {
-                $adlsTarget = $targetObject.adlsGen2
-            }
-
-            $locationMatches = $false
-            $subpathMatches = $false
-
-            if ($adlsTarget) {
-                if ($adlsTarget.PSObject.Properties['location']) {
-                    $locationMatches = [string]::Equals([string]$adlsTarget.location, $operationsEndpoint, [System.StringComparison]::OrdinalIgnoreCase)
-                }
-
-                if ($adlsTarget.PSObject.Properties['subpath']) {
-                    $subpathMatches = [string]::Equals([string]$adlsTarget.subpath, $containerSubpath, [System.StringComparison]::OrdinalIgnoreCase)
-                }
-            }
-
-            if ($locationMatches -and $subpathMatches) {
-                Write-Log "Operations shortcut '$shortcutName' already exists at path '$targetPath' with the correct ADLS target; skipping creation." 'INFO'
-                continue
-            }
-
-            Write-Log "Operations shortcut '$shortcutName' exists at path '$targetPath' but points to a different target; recreating." 'WARN'
-
-            $shortcutId = if ($existingShortcut.PSObject.Properties['id']) { [string]$existingShortcut.id } else { $null }
-            if ([string]::IsNullOrWhiteSpace($shortcutId)) {
-                Write-Log "Unable to remediate shortcut '$shortcutName' because the existing entry did not include an id; skipping." 'ERROR'
-                continue
-            }
-
-            $deleteSucceeded = Remove-FabricShortcut -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutId $shortcutId -ShortcutName $shortcutName
-            if (-not $deleteSucceeded) {
-                Write-Log "Skipping recreation of operations shortcut '$shortcutName' due to delete failure." 'ERROR'
-                continue
-            }
-
-            $shortcutItems = $shortcutItems | Where-Object {
-                if ($_.PSObject.Properties['id']) {
-                    -not [string]::Equals([string]$_.id, $shortcutId, [System.StringComparison]::OrdinalIgnoreCase)
-                } else {
-                    -not (
-                        $_.PSObject.Properties['name'] -and [string]::Equals([string]$_.name, $shortcutName, [System.StringComparison]::OrdinalIgnoreCase) -and
-                        $_.PSObject.Properties['path'] -and [string]::Equals([string]$_.path, $targetPath, [System.StringComparison]::OrdinalIgnoreCase)
-                    )
-                }
-            }
+            $message = "Shortcut '$shortcutName' already exists at '$shortcutPath'."
+            Write-Log $message 'INFO'
+            continue
         }
 
         $body = @{
@@ -2060,9 +1714,9 @@ function New-FabricOperationsShortcuts {
             name = $shortcutName
             target = @{
                 adlsGen2 = @{
-                    location = $operationsEndpoint
+                    location = $storageLocation
                     subpath  = $containerSubpath
-                    connectionId = $operationsConnectionId
+                    connectionId = $connectionId
                 }
             }
         }
@@ -2073,53 +1727,13 @@ function New-FabricOperationsShortcuts {
         $uri = "$($FabricEndpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts?shortcutConflictPolicy=Abort"
 
         try {
-            $creationResult = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create operations shortcut '$shortcutName'"
-            $successMessage = "Created Fabric operations shortcut '$shortcutName' -> '$operationsEndpoint$containerSubpath'."
+            Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create shortcut '$shortcutName'"
+            $successMessage = "Created Fabric shortcut '$shortcutName' -> '$storageLocation$containerSubpath'."
             Write-Log $successMessage 'INFO'
-
-            if ($creationResult -and $creationResult.Response) {
-                $createdShortcut = $creationResult.Response
-                if ($createdShortcut) {
-                    $shortcutItems = @($shortcutItems + $createdShortcut)
-                }
-            }
         } catch {
-            $caughtError = $_
-            $handledConflict = $false
-
-            if ($caughtError.Exception -and $caughtError.Exception.Response) {
-                $response = $caughtError.Exception.Response
-                $statusCodeValue = $null
-
-                if ($response -is [System.Net.Http.HttpResponseMessage]) {
-                    $statusCodeValue = [int]$response.StatusCode
-                } elseif ($response.PSObject.Properties['StatusCode']) {
-                    $statusCodeRaw = $response.StatusCode
-                    try {
-                        $statusCodeValue = [int]$statusCodeRaw
-                    } catch {
-                        if ($statusCodeRaw -and $statusCodeRaw.PSObject.Properties['value__']) {
-                            $statusCodeValue = [int]$statusCodeRaw.value__
-                        }
-                    }
-                }
-
-                if ($statusCodeValue -eq 409) {
-                    Write-Log "Operations shortcut '$shortcutName' already exists according to Fabric API (HTTP 409). Skipping creation." 'WARN'
-                    $handledConflict = $true
-
-                    $refreshedIndex = Get-FabricShortcutIndex -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
-                    if ($refreshedIndex.Success) {
-                        $shortcutItems = if ($refreshedIndex.Items) { @($refreshedIndex.Items) } else { @() }
-                    }
-                }
-            }
-
-            if (-not $handledConflict) {
-                $errorMessage = "Failed to create operations shortcut '$shortcutName': $($caughtError.Exception.Message)"
-                Write-Log $errorMessage 'ERROR'
-                throw
-            }
+            $errorMessage = "Failed to create shortcut '$shortcutName': $($_.Exception.Message)"
+            Write-Log $errorMessage 'ERROR'
+            throw
         }
     }
 }
@@ -2247,8 +1861,8 @@ if (-not $SkipFabricShortcuts) {
 
     New-FabricImageShortcuts -OneLakeEndpoint $FabricApiEndpoint -FabricEndpoint $FabricManagementEndpoint -WorkspaceId $FabricWorkspaceId -LakehouseId $HdsBronzeLakehouse -OneLakeAccessToken $oneLakeAccessToken -FabricAccessToken $fabricApiAccessToken -StmoDefinitions $stmoDefinitions -BlobStorageAccountName $imageBlobAccountName -BlobConnectionDisplayName $blobConnectionDisplayName
 
-    New-FabricOperationsShortcuts -OneLakeEndpoint $FabricApiEndpoint -FabricEndpoint $FabricManagementEndpoint -WorkspaceId $FabricWorkspaceId -LakehouseId $HdsBronzeLakehouse -OneLakeAccessToken $oneLakeAccessToken -FabricAccessToken $fabricApiAccessToken -StmoDefinitions $stmoDefinitions -OperationsPath $LakehouseOperationsPath -InventoryStorageAccountName $imageOperationsAccountName
-    Write-Log 'Fabric inventory (blob) and operations shortcuts created or verified successfully.' 'INFO'
+    New-FabricInventoryShortcuts -OneLakeEndpoint $FabricApiEndpoint -FabricEndpoint $FabricManagementEndpoint -WorkspaceId $FabricWorkspaceId -LakehouseId $HdsBronzeLakehouse -OneLakeAccessToken $oneLakeAccessToken -FabricAccessToken $fabricApiAccessToken -StmoDefinitions $stmoDefinitions -OperationsPath $LakehouseOperationsPath -InventoryStorageAccountName $imageOperationsAccountName
+    Write-Log 'Fabric image and operations shortcuts created or verified successfully.' 'INFO'
 } else {
     Write-Log 'Fabric shortcut creation skipped by user request.' 'WARN'
 }

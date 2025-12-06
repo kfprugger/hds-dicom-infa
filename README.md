@@ -346,6 +346,7 @@ Connect-AzAccount
 ├── example-stmos.csv                       # Example STMO definitions
 ├── example-fmos-stmos.csv                  # Alternative example CSV
 ├── README.md
+├── LICENSE                                 # MIT License
 └── infra/
     ├── storageAccounts.bicep              # Main Bicep template
     └── modules/
@@ -492,8 +493,14 @@ All notable changes to this project will be documented in this section.
 
 ## License
 
-[Specify license here]
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Contributing
 
-[Contribution guidelines here]
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request

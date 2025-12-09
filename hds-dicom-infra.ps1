@@ -1,4 +1,42 @@
+<#
+.SYNOPSIS
+    Deploys Azure Health Data Services DICOM infrastructure with integrated Fabric storage.
 
+.DESCRIPTION
+    This script provisions and configures Azure Health Data Services (HDS) DICOM infrastructure,
+    including storage accounts, Fabric workspace integration, lakehouse shortcuts, and folder
+    structures. It supports bulk deployment for multiple facilities using a CSV input file.
+
+.AUTHOR
+    Joey Brakefield
+
+.DATE
+    December 9, 2025
+
+.EXAMPLE
+    .\hds-dicom-infra.ps1 `
+        -FacilityCsvPath .\example-stmos.csv `
+        -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 `
+        -location westus3 `
+        -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
+        -ResourceGroupName rg-DICOM `
+        -hdsWorkspaceName DICOM-Integration
+
+.EXAMPLE
+    .\hds-dicom-infra.ps1 `
+        -FacilityCsvPath .\example-stmos.csv `
+        -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 `
+        -location westus3 `
+        -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
+        -ResourceGroupName rg-DICOM `
+        -hdsWorkspaceName DICOM-Integration `
+        -ReuseStorageAccounts
+    # Prompts for existing storage account names to reuse pre-provisioned accounts
+
+.NOTES
+    Requires Az.Accounts, Az.Resources, and Az.Storage PowerShell modules.
+    More info: https://github.com/kfprugger/hds-dicom-infra
+#>
 
 # .\hds-dicom-infra.ps1 
 # `-FacilityCsvPath .\example-stmos.csv `
@@ -21,7 +59,7 @@
 # -SkipFabricFolders `
 # -SkipFabricShortcuts 
 
-#requires -Modules Az.Accounts, Az.Resources
+#requires -Modules Az.Accounts, Az.Resources, Az.Storage
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [Parameter(Mandatory = $true)]
@@ -78,7 +116,13 @@ param(
 
     [switch]$SkipFabricFolders, # explain to skip the creation of Fabric folders portion of the script
 
-    [switch]$SkipFabricShortcuts # explain to skip the creation of Fabric shortcuts portion of the script
+    [switch]$SkipFabricShortcuts, # explain to skip the creation of Fabric shortcuts portion of the script
+
+    [switch]$ReuseStorageAccounts, # When set, prompts for existing storage account names to reuse pre-provisioned accounts
+
+    [string]$ExistingBlobStorageAccountName, # Name of existing blob storage account for image files (used with -ReuseStorageAccounts)
+
+    [string]$ExistingOperationsStorageAccountName # Name of existing ADLS Gen2 storage account for operations files (used with -ReuseStorageAccounts)
 
 )
 
@@ -369,6 +413,345 @@ function Invoke-StorageDeployment {
         Write-Log 'Deploying storage accounts and containers with New-AzResourceGroupDeployment.' 'INFO'
         New-AzResourceGroupDeployment @deploymentParams -ErrorAction Stop -DeploymentDebugLogLevel All 
     }
+}
+
+function Test-StorageAccountExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName
+    )
+
+    try {
+        $account = Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName -ErrorAction Stop
+        return $account
+    } catch {
+        if ($_.Exception.Message -match 'was not found|does not exist') {
+            return $null
+        }
+        throw $_
+    }
+}
+
+function Get-StorageAccountContainers {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName
+    )
+
+    $context = (Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName).Context
+    $containers = Get-AzStorageContainer -Context $context -ErrorAction SilentlyContinue
+    return $containers
+}
+
+function New-MissingContainers {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][array]$RequiredContainers
+    )
+
+    $context = (Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName).Context
+    $existingContainers = Get-AzStorageContainer -Context $context -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name
+
+    foreach ($containerName in $RequiredContainers) {
+        if ($existingContainers -notcontains $containerName) {
+            Write-Log "Creating missing container '$containerName' in storage account '$StorageAccountName'." 'INFO'
+            New-AzStorageContainer -Name $containerName -Context $context -Permission Off -ErrorAction Stop | Out-Null
+        } else {
+            Write-Log "Container '$containerName' already exists in storage account '$StorageAccountName'." 'DEBUG'
+        }
+    }
+}
+
+function Test-RoleAssignmentExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Scope,
+        [Parameter(Mandatory = $true)][string]$PrincipalId,
+        [Parameter(Mandatory = $true)][string]$RoleDefinitionId
+    )
+
+    $assignments = Get-AzRoleAssignment -Scope $Scope -PrincipalId $PrincipalId -ErrorAction SilentlyContinue
+    $roleAssignment = $assignments | Where-Object { $_.RoleDefinitionId -eq $RoleDefinitionId }
+    return ($null -ne $roleAssignment)
+}
+
+function New-MissingRoleAssignment {
+    param(
+        [Parameter(Mandatory = $true)][string]$Scope,
+        [Parameter(Mandatory = $true)][string]$PrincipalId,
+        [Parameter(Mandatory = $true)][string]$RoleDefinitionName,
+        [Parameter(Mandatory = $true)][string]$PrincipalType,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $existingAssignment = Get-AzRoleAssignment -Scope $Scope -ObjectId $PrincipalId -RoleDefinitionName $RoleDefinitionName -ErrorAction SilentlyContinue
+
+    if (-not $existingAssignment) {
+        Write-Log "Assigning '$RoleDefinitionName' to $Description on scope '$Scope'." 'INFO'
+        New-AzRoleAssignment -Scope $Scope -ObjectId $PrincipalId -RoleDefinitionName $RoleDefinitionName -ObjectType $PrincipalType -ErrorAction Stop | Out-Null
+    } else {
+        Write-Log "'$RoleDefinitionName' already assigned to $Description on scope '$Scope'." 'DEBUG'
+    }
+}
+
+function Get-BlobInventoryPolicy {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName
+    )
+
+    try {
+        $policy = Get-AzStorageBlobInventoryPolicy -StorageAccountResourceId "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName" -ErrorAction Stop
+        return $policy
+    } catch {
+        if ($_.Exception.Message -match 'BlobInventoryPolicyNotFound|does not exist') {
+            return $null
+        }
+        throw $_
+    }
+}
+
+function New-MissingInventoryPolicy {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][array]$StmoDefinitions
+    )
+
+    $existingPolicy = Get-BlobInventoryPolicy -StorageAccountName $StorageAccountName -ResourceGroupName $ResourceGroupName
+    $existingRuleNames = @()
+    
+    if ($existingPolicy -and $existingPolicy.Policy -and $existingPolicy.Policy.Rules) {
+        $existingRuleNames = $existingPolicy.Policy.Rules | Select-Object -ExpandProperty Name
+    }
+
+    $inventorySchemaFields = @(
+        'Name', 'Creation-Time', 'Last-Modified', 'ETag', 'Content-Length', 'Content-Type',
+        'Content-Encoding', 'Content-Language', 'Content-CRC64', 'Content-MD5', 'Cache-Control',
+        'Content-Disposition', 'BlobType', 'AccessTier', 'AccessTierChangeTime', 'AccessTierInferred',
+        'Metadata', 'LastAccessTime', 'LeaseStatus', 'LeaseState', 'LeaseDuration', 'ServerEncrypted',
+        'CustomerProvidedKeySha256', 'RehydratePriority', 'ArchiveStatus', 'EncryptionScope',
+        'CopyId', 'CopyStatus', 'CopySource', 'CopyProgress', 'CopyCompletionTime', 'CopyStatusDescription',
+        'ImmutabilityPolicyUntilDate', 'ImmutabilityPolicyMode', 'LegalHold', 'Tags', 'TagCount'
+    )
+
+    $newRules = @()
+    foreach ($definition in $StmoDefinitions) {
+        if ($existingRuleNames -notcontains $definition.RuleName) {
+            Write-Log "Adding inventory rule '$($definition.RuleName)' for container '$($definition.ContainerName)'." 'INFO'
+            
+            $filter = New-AzStorageBlobInventoryPolicyRule -Name $definition.RuleName `
+                -Destination $definition.InventoryContainerName `
+                -Format Parquet `
+                -Schedule Weekly `
+                -BlobType blockBlob `
+                -PrefixMatch @($definition.PrefixMatch) `
+                -BlobSchemaField $inventorySchemaFields
+
+            $newRules += $filter
+        } else {
+            Write-Log "Inventory rule '$($definition.RuleName)' already exists." 'DEBUG'
+        }
+    }
+
+    if ($newRules.Count -gt 0) {
+        # Combine existing rules with new rules
+        $allRules = @()
+        if ($existingPolicy -and $existingPolicy.Policy -and $existingPolicy.Policy.Rules) {
+            foreach ($rule in $existingPolicy.Policy.Rules) {
+                $existingRule = New-AzStorageBlobInventoryPolicyRule -Name $rule.Name `
+                    -Destination $rule.Definition.Destination `
+                    -Format $rule.Definition.Format `
+                    -Schedule $rule.Definition.Schedule `
+                    -BlobType $rule.Definition.Filters.BlobTypes `
+                    -PrefixMatch $rule.Definition.Filters.PrefixMatch `
+                    -BlobSchemaField $rule.Definition.SchemaFields
+                $allRules += $existingRule
+            }
+        }
+        $allRules += $newRules
+
+        $storageAccountResourceId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Storage/storageAccounts/$StorageAccountName"
+        Set-AzStorageBlobInventoryPolicy -StorageAccountResourceId $storageAccountResourceId -Rule $allRules -ErrorAction Stop | Out-Null
+        Write-Log "Inventory policy updated with $($newRules.Count) new rule(s) on storage account '$StorageAccountName'." 'INFO'
+    } else {
+        Write-Log "All required inventory rules already exist on storage account '$StorageAccountName'." 'DEBUG'
+    }
+}
+
+function Set-AdlsContainerAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$StorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][string]$ContainerName,
+        [Parameter(Mandatory = $true)][string]$PrincipalId,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('user', 'group', 'sp', 'other')]
+        [string]$PrincipalType,
+        [string]$Permissions = 'rwx'
+    )
+
+    $context = (Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageAccountName).Context
+    
+    # Map principal type to ACL accessor type
+    $aclAccessorType = switch ($PrincipalType) {
+        'user'  { 'user' }
+        'group' { 'group' }
+        'sp'    { 'user' }  # Service principals use 'user' type in ACLs
+        'other' { 'other' }
+    }
+
+    # Build the ACL entry for both access and default ACLs
+    $accessAclEntry = "default:$aclAccessorType`:$PrincipalId`:$Permissions,$aclAccessorType`:$PrincipalId`:$Permissions"
+
+    Write-Log "Setting ACL on container '$ContainerName' for principal '$PrincipalId' with permissions '$Permissions' (type: $aclAccessorType)." 'INFO'
+
+    try {
+        # Get the root filesystem item (container)
+        $filesystem = Get-AzDataLakeGen2Item -Context $context -FileSystem $ContainerName -ErrorAction Stop
+
+        # Get current ACL
+        $currentAcl = $filesystem.ACL
+
+        # Parse existing ACL entries and check if our entry already exists
+        $existingEntries = @()
+        $hasAccessEntry = $false
+        $hasDefaultEntry = $false
+
+        foreach ($entry in $currentAcl) {
+            $entryString = $entry.ToString()
+            if ($entryString -match "^$aclAccessorType`:$PrincipalId`:") {
+                $hasAccessEntry = $true
+            }
+            if ($entryString -match "^default:$aclAccessorType`:$PrincipalId`:") {
+                $hasDefaultEntry = $true
+            }
+            $existingEntries += $entryString
+        }
+
+        # Build new ACL entries to add
+        $newAclEntries = @()
+        if (-not $hasAccessEntry) {
+            $newAclEntries += "$aclAccessorType`:$PrincipalId`:$Permissions"
+        }
+        if (-not $hasDefaultEntry) {
+            $newAclEntries += "default:$aclAccessorType`:$PrincipalId`:$Permissions"
+        }
+
+        if ($newAclEntries.Count -eq 0) {
+            Write-Log "ACL entries for principal '$PrincipalId' already exist on container '$ContainerName'." 'DEBUG'
+        } else {
+            # Create the ACL object with new entries
+            $acl = Set-AzDataLakeGen2ItemAclObject -AccessControlType $aclAccessorType -EntityId $PrincipalId -Permission $Permissions
+            $acl = Set-AzDataLakeGen2ItemAclObject -AccessControlType $aclAccessorType -EntityId $PrincipalId -Permission $Permissions -DefaultScope -InputObject $acl
+
+            # Update ACL on root with recursive cascade
+            Write-Log "Applying ACL recursively on container '$ContainerName'..." 'INFO'
+            Update-AzDataLakeGen2AclRecursive -Context $context -FileSystem $ContainerName -Acl $acl -ErrorAction Stop | Out-Null
+            Write-Log "ACL applied recursively on container '$ContainerName' for principal '$PrincipalId'." 'INFO'
+        }
+    } catch {
+        Write-Log "Failed to set ACL on container '$ContainerName': $($_.Exception.Message)" 'ERROR'
+        throw
+    }
+}
+
+function Confirm-ExistingStorageAccounts {
+    param(
+        [Parameter(Mandatory = $true)][string]$BlobStorageAccountName,
+        [Parameter(Mandatory = $true)][string]$OperationsStorageAccountName,
+        [Parameter(Mandatory = $true)][string]$ResourceGroupName,
+        [Parameter(Mandatory = $true)][array]$StmoDefinitions,
+        [Parameter(Mandatory = $true)][string]$TrustedWorkspacePrincipalId,
+        [Parameter(Mandatory = $true)][string]$TrustedWorkspacePrincipalType,
+        [Parameter(Mandatory = $true)][string]$DicomAdminSecurityGroupId
+    )
+
+    Write-Log "Validating existing blob storage account '$BlobStorageAccountName'..." 'INFO'
+    $blobAccount = Test-StorageAccountExists -StorageAccountName $BlobStorageAccountName -ResourceGroupName $ResourceGroupName
+    if (-not $blobAccount) {
+        throw "Blob storage account '$BlobStorageAccountName' does not exist in resource group '$ResourceGroupName'."
+    }
+    Write-Log "Blob storage account '$BlobStorageAccountName' found." 'INFO'
+
+    Write-Log "Validating existing operations storage account '$OperationsStorageAccountName'..." 'INFO'
+    $operationsAccount = Test-StorageAccountExists -StorageAccountName $OperationsStorageAccountName -ResourceGroupName $ResourceGroupName
+    if (-not $operationsAccount) {
+        throw "Operations storage account '$OperationsStorageAccountName' does not exist in resource group '$ResourceGroupName'."
+    }
+    
+    # Verify operations account has HNS enabled (ADLS Gen2) - this is required for Fabric integration
+    if (-not $operationsAccount.EnableHierarchicalNamespace) {
+        throw "Operations storage account '$OperationsStorageAccountName' does not have hierarchical namespace (ADLS Gen2) enabled. This is required for Fabric integration. Please use an ADLS Gen2 storage account."
+    }
+    Write-Log "Operations storage account '$OperationsStorageAccountName' found with HNS enabled." 'INFO'
+
+    # Determine required containers for blob account (primary + inventory)
+    $blobContainers = @()
+    foreach ($definition in $StmoDefinitions) {
+        $blobContainers += $definition.ContainerName
+        $blobContainers += $definition.InventoryContainerName
+    }
+    $blobContainers = $blobContainers | Select-Object -Unique
+
+    # Determine required containers for operations account
+    $operationsContainers = $StmoDefinitions | Select-Object -ExpandProperty ContainerName -Unique
+
+    Write-Log "Ensuring required containers exist on blob storage account '$BlobStorageAccountName'..." 'INFO'
+    New-MissingContainers -StorageAccountName $BlobStorageAccountName -ResourceGroupName $ResourceGroupName -RequiredContainers $blobContainers
+
+    Write-Log "Ensuring required containers exist on operations storage account '$OperationsStorageAccountName'..." 'INFO'
+    New-MissingContainers -StorageAccountName $OperationsStorageAccountName -ResourceGroupName $ResourceGroupName -RequiredContainers $operationsContainers
+
+    # Ensure inventory policy rules exist on blob storage account
+    Write-Log "Ensuring inventory policy rules exist on blob storage account '$BlobStorageAccountName'..." 'INFO'
+    New-MissingInventoryPolicy -StorageAccountName $BlobStorageAccountName -ResourceGroupName $ResourceGroupName -StmoDefinitions $StmoDefinitions
+
+    # Assign role assignments if not present
+    $storageBlobDataContributorRole = 'Storage Blob Data Contributor'
+
+    if (-not [string]::IsNullOrWhiteSpace($TrustedWorkspacePrincipalId)) {
+        Write-Log "Ensuring workspace identity has '$storageBlobDataContributorRole' role on storage accounts..." 'INFO'
+        
+        New-MissingRoleAssignment -Scope $blobAccount.Id -PrincipalId $TrustedWorkspacePrincipalId `
+            -RoleDefinitionName $storageBlobDataContributorRole -PrincipalType $TrustedWorkspacePrincipalType `
+            -Description "workspace identity '$TrustedWorkspacePrincipalId'"
+
+        New-MissingRoleAssignment -Scope $operationsAccount.Id -PrincipalId $TrustedWorkspacePrincipalId `
+            -RoleDefinitionName $storageBlobDataContributorRole -PrincipalType $TrustedWorkspacePrincipalType `
+            -Description "workspace identity '$TrustedWorkspacePrincipalId'"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DicomAdminSecurityGroupId)) {
+        Write-Log "Ensuring DICOM admin security group has '$storageBlobDataContributorRole' role on storage accounts..." 'INFO'
+        
+        New-MissingRoleAssignment -Scope $blobAccount.Id -PrincipalId $DicomAdminSecurityGroupId `
+            -RoleDefinitionName $storageBlobDataContributorRole -PrincipalType 'Group' `
+            -Description "DICOM admin security group '$DicomAdminSecurityGroupId'"
+
+        New-MissingRoleAssignment -Scope $operationsAccount.Id -PrincipalId $DicomAdminSecurityGroupId `
+            -RoleDefinitionName $storageBlobDataContributorRole -PrincipalType 'Group' `
+            -Description "DICOM admin security group '$DicomAdminSecurityGroupId'"
+    }
+
+    # Apply ACLs on ADLS Gen2 (operations) containers with cascading
+    Write-Log "Applying ACLs on ADLS Gen2 operations containers with recursive cascade..." 'INFO'
+    foreach ($containerName in $operationsContainers) {
+        # Apply ACL for workspace identity (service principal)
+        if (-not [string]::IsNullOrWhiteSpace($TrustedWorkspacePrincipalId)) {
+            Set-AdlsContainerAcl -StorageAccountName $OperationsStorageAccountName -ResourceGroupName $ResourceGroupName `
+                -ContainerName $containerName -PrincipalId $TrustedWorkspacePrincipalId -PrincipalType 'sp' -Permissions 'rwx'
+        }
+
+        # Apply ACL for DICOM admin security group
+        if (-not [string]::IsNullOrWhiteSpace($DicomAdminSecurityGroupId)) {
+            Set-AdlsContainerAcl -StorageAccountName $OperationsStorageAccountName -ResourceGroupName $ResourceGroupName `
+                -ContainerName $containerName -PrincipalId $DicomAdminSecurityGroupId -PrincipalType 'group' -Permissions 'rwx'
+        }
+    }
+    Write-Log "ACLs applied successfully on ADLS Gen2 operations containers." 'INFO'
+
+    Write-Log "Existing storage accounts validated and configured successfully." 'INFO'
 }
 
 function Resolve-LakehouseSegments {
@@ -1740,7 +2123,7 @@ function New-FabricInventoryShortcuts {
 
 Write-Log 'Starting HDS DICOM infrastructure orchestration.' 'INFO'
 
-$moduleNames = @('Az.Accounts', 'Az.Resources')
+$moduleNames = @('Az.Accounts', 'Az.Resources', 'Az.Storage')
 foreach ($name in $moduleNames) {
     if (-not (Get-Module -Name $name)) {
         Import-Module $name -ErrorAction Stop
@@ -1754,22 +2137,48 @@ foreach ($definition in $stmoDefinitions) {
     Write-Log "Study '$($definition.OriginalName)' sanitized to container '$($definition.ContainerName)' (inventory '$($definition.InventoryContainerName)')." 'DEBUG'
 }
 
-$blobAccount = Get-SharedStorageAccountName -Prefix $PrefixName -CoreSegment $ImageBlobAccountCoreName -Suffix $LocationSuffix
-$operationsAccount = Get-SharedStorageAccountName -Prefix $PrefixName -CoreSegment $ImageOperationsAccountCoreName -Suffix $LocationSuffix
+# Determine storage account names based on ReuseStorageAccounts switch
+if ($ReuseStorageAccounts) {
+    Write-Log 'Reuse storage accounts mode enabled.' 'INFO'
+    
+    # Prompt for blob storage account name if not provided
+    if ([string]::IsNullOrWhiteSpace($ExistingBlobStorageAccountName)) {
+        $ExistingBlobStorageAccountName = Read-Host -Prompt 'Enter the name of the existing Blob storage account for DICOM image files'
+        if ([string]::IsNullOrWhiteSpace($ExistingBlobStorageAccountName)) {
+            throw 'Blob storage account name is required when using -ReuseStorageAccounts.'
+        }
+    }
+    
+    # Prompt for operations storage account name if not provided
+    if ([string]::IsNullOrWhiteSpace($ExistingOperationsStorageAccountName)) {
+        $ExistingOperationsStorageAccountName = Read-Host -Prompt 'Enter the name of the existing ADLS Gen2 storage account for FHIR operations files'
+        if ([string]::IsNullOrWhiteSpace($ExistingOperationsStorageAccountName)) {
+            throw 'Operations storage account name is required when using -ReuseStorageAccounts.'
+        }
+    }
+    
+    $imageBlobAccountName = $ExistingBlobStorageAccountName.ToLowerInvariant().Trim()
+    $imageOperationsAccountName = $ExistingOperationsStorageAccountName.ToLowerInvariant().Trim()
+    
+    Write-Log "Using existing blob storage account '$imageBlobAccountName' and operations storage account '$imageOperationsAccountName'." 'INFO'
+} else {
+    $blobAccount = Get-SharedStorageAccountName -Prefix $PrefixName -CoreSegment $ImageBlobAccountCoreName -Suffix $LocationSuffix
+    $operationsAccount = Get-SharedStorageAccountName -Prefix $PrefixName -CoreSegment $ImageOperationsAccountCoreName -Suffix $LocationSuffix
 
-$imageBlobAccountName = $blobAccount.Name
-$imageOperationsAccountName = $operationsAccount.Name
+    $imageBlobAccountName = $blobAccount.Name
+    $imageOperationsAccountName = $operationsAccount.Name
 
-if ($blobAccount.WasTrimmed) {
-    Write-Log "Blob storage account name trimmed to '$imageBlobAccountName' to satisfy Azure naming limits." 'WARN'
-}
+    if ($blobAccount.WasTrimmed) {
+        Write-Log "Blob storage account name trimmed to '$imageBlobAccountName' to satisfy Azure naming limits." 'WARN'
+    }
 
-if ($operationsAccount.WasTrimmed) {
-    Write-Log "Operations storage account name trimmed to '$imageOperationsAccountName' to satisfy Azure naming limits." 'WARN'
+    if ($operationsAccount.WasTrimmed) {
+        Write-Log "Operations storage account name trimmed to '$imageOperationsAccountName' to satisfy Azure naming limits." 'WARN'
+    }
 }
 
 if ($imageBlobAccountName -eq $imageOperationsAccountName) {
-    throw "Derived blob and operations storage account names are identical ('$imageBlobAccountName'). Adjust core name parameters to ensure unique names."
+    throw "Blob and operations storage account names are identical ('$imageBlobAccountName'). These must be different storage accounts."
 }
 
 Write-Log "Using blob storage account '$imageBlobAccountName' and operations storage account '$imageOperationsAccountName'." 'INFO'
@@ -1801,7 +2210,21 @@ if ([string]::IsNullOrWhiteSpace($trustedWorkspacePrincipalId)) {
 
 Write-Log "Workspace identity '$hdsWorkspaceName' resolved to object ID '$trustedWorkspacePrincipalId'." 'INFO'
 
-if (-not $SkipStorageDeployment) {
+# Handle storage account provisioning or validation based on ReuseStorageAccounts switch
+if ($ReuseStorageAccounts) {
+    Write-Log 'Validating and configuring existing storage accounts...' 'INFO'
+    
+    Confirm-ExistingStorageAccounts `
+        -BlobStorageAccountName $imageBlobAccountName `
+        -OperationsStorageAccountName $imageOperationsAccountName `
+        -ResourceGroupName $ResourceGroupName `
+        -StmoDefinitions $stmoDefinitions `
+        -TrustedWorkspacePrincipalId $trustedWorkspacePrincipalId `
+        -TrustedWorkspacePrincipalType $TrustedWorkspacePrincipalType `
+        -DicomAdminSecurityGroupId $DicomAdmSecGrpId
+    
+    Write-Log 'Existing storage accounts validated and configured successfully.' 'INFO'
+} elseif (-not $SkipStorageDeployment) {
     $stmoTemplateDefinitions = @()
     foreach ($definition in $stmoDefinitions) {
         $stmoTemplateDefinitions += @{
@@ -1831,7 +2254,9 @@ if (-not $SkipStorageDeployment) {
 
         Invoke-StorageDeployment -DeploymentName $DeploymentName -ResourceGroup $ResourceGroupName -TemplatePath $stoBicepTemplatePath -TemplateParameters $templateParameters 
 } else {
-    Write-Log 'Storage deployment skipped by user request.' 'WARN'
+    if (-not $ReuseStorageAccounts) {
+        Write-Log 'Storage deployment skipped by user request (-SkipStorageDeployment).' 'WARN'
+    }
 }
 
 $oneLakeAccessToken = $null

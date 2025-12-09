@@ -11,6 +11,7 @@ The solution orchestrates five responsibilities:
 2. **Shared storage provisioning** – Deploys two storage accounts using the `infra/storageAccounts.bicep` template:
    - **Image Blob Account** (`sa{imgdcm}{suffix}`) – Standard blob storage for DICOM image ingestion. One container per STMO plus corresponding inventory containers with `-inv` suffix.
    - **Image Operations Account** (`sa{imgops}{suffix}`) – ADLS Gen2 (hierarchical namespace enabled) for inventory output and downstream processing. One container per STMO.
+   - **Reuse existing accounts** – Optionally reuse pre-provisioned storage accounts with `-ReuseStorageAccounts` switch. The script validates accounts exist, creates missing containers, configures inventory policies, assigns RBAC roles, and applies ADLS Gen2 ACLs with recursive cascading.
 
 3. **Blob inventory governance** – Each STMO receives a dedicated blob inventory policy on the image blob account that scans block blobs weekly, captures all available metadata fields in Apache Parquet format, and writes results to the associated `-inv` container.
 
@@ -311,6 +312,26 @@ Connect-AzAccount
     -SkipStorageDeployment
 ```
 
+**Reuse existing storage accounts** (validates, configures containers, RBAC, and ACLs):
+
+```powershell
+.\hds-dicom-infra.ps1 `
+    -FacilityCsvPath .\example-stmos.csv `
+    -TenantId "<tenant-guid>" `
+    -SubscriptionId "<subscription-guid>" `
+    -location westus3 `
+    -ResourceGroupName rg-DICOM `
+    -hdsWorkspaceName DICOM-Integration `
+    -FabricWorkspaceId "<fabric-workspace-guid>" `
+    -HdsBronzeLakehouse "<lakehouse-guid>" `
+    -DicomAdmSecGrpId "<security-group-object-id>" `
+    -ReuseStorageAccounts `
+    -ExistingBlobStorageAccountName "myexistingblobaccount" `
+    -ExistingOperationsStorageAccountName "myexistingadlsaccount"
+```
+
+> **Note:** When using `-ReuseStorageAccounts` without specifying account names, the script will prompt interactively. The operations account **must** have Hierarchical Namespace (ADLS Gen2) enabled or the script will fail.
+
 ### Key Parameters
 
 | Parameter | Description | Default |
@@ -334,6 +355,9 @@ Connect-AzAccount
 | `-SkipStorageDeployment` | Skip Azure storage account/container provisioning | `$false` |
 | `-SkipFabricFolders` | Skip lakehouse folder creation | `$false` |
 | `-SkipFabricShortcuts` | Skip Fabric connection and shortcut creation | `$false` |
+| `-ReuseStorageAccounts` | Reuse pre-provisioned storage accounts instead of deploying new ones | `$false` |
+| `-ExistingBlobStorageAccountName` | Name of existing blob storage account (used with `-ReuseStorageAccounts`) | – |
+| `-ExistingOperationsStorageAccountName` | Name of existing ADLS Gen2 storage account (used with `-ReuseStorageAccounts`) | – |
 | `-WhatIf` | Preview Bicep deployment without applying changes | – |
 | `-Debug` | Enable verbose debug logging | – |
 
@@ -457,6 +481,23 @@ This adds a resource instance rule using `Add-AzStorageAccountNetworkRule`, whic
 ## Changelog
 
 All notable changes to this project will be documented in this section.
+
+### [1.2.0] - 2025-12-09
+
+#### Added
+- **Reuse existing storage accounts** – New `-ReuseStorageAccounts` switch enables reusing pre-provisioned storage accounts instead of deploying new ones
+- New parameters `-ExistingBlobStorageAccountName` and `-ExistingOperationsStorageAccountName` for specifying existing account names
+- Interactive prompts for storage account names when `-ReuseStorageAccounts` is used without explicit account names
+- Validation that existing operations storage account has Hierarchical Namespace (ADLS Gen2) enabled – script now fails if HNS is not enabled
+- Automatic creation of missing containers on existing storage accounts
+- Automatic configuration of missing blob inventory policy rules on existing accounts
+- Automatic RBAC role assignment for workspace identity and DICOM admin group on existing accounts
+- **ADLS Gen2 ACL cascading** – Recursive ACL application on operations containers for both workspace identity and DICOM admin security group
+- New helper functions: `Test-StorageAccountExists`, `Get-StorageAccountContainers`, `New-MissingContainers`, `New-MissingRoleAssignment`, `Get-BlobInventoryPolicy`, `New-MissingInventoryPolicy`, `Set-AdlsContainerAcl`, `Confirm-ExistingStorageAccounts`
+
+#### Changed
+- Operations storage account now requires ADLS Gen2 (HNS enabled) – validation failure instead of warning
+- Updated module requirements to include `Az.Storage` for container and ACL management
 
 ### [1.1.0] - 2025-12-06
 

@@ -30,8 +30,10 @@
         -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
         -ResourceGroupName rg-DICOM `
         -hdsWorkspaceName DICOM-Integration `
-        -ReuseStorageAccounts
-    # Prompts for existing storage account names to reuse pre-provisioned accounts
+        -ImagesStorageAccountName saimgdcmwu3 `
+        -FHIROpsStorageAccountName saimgopswu3 `
+        -SkipStorageDeployment
+    # Uses specified storage accounts and skips Bicep deployment if accounts already exist
 
 .NOTES
     Requires Az.Accounts, Az.Resources, and Az.Storage PowerShell modules.
@@ -45,8 +47,8 @@
 # -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f 
 # -ResourceGroupName rg-DICOM `
 # -hdsWorkspaceName DICOM-Integration `
-# -PrefixName sa `
-# -LocationSuffix wu3 `
+# -ImagesStorageAccountName saimgdcmwu3 `
+# -FHIROpsStorageAccountName saimgopswu3 `
 # -stoBicepTemplatePath '.\\infra\\storageAccounts.bicep' `
 # -DeploymentName hds-storage-provisioning `
 # -StorageAccountSkuName Standard_LRS `
@@ -80,9 +82,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$hdsWorkspaceName = 'DICOM-Integration', # default workspace name
 
-    [string]$PrefixName = 'sa', # storage account name prefix
+    [Parameter(Mandatory = $true)]
+    [string]$ImagesStorageAccountName, # Name of the Azure Blob storage account for DICOM images and inventory files
 
-    [string]$LocationSuffix = 'wu3', #typically should be the short form of the location. I will create a mapping table later.
+    [Parameter(Mandatory = $true)]
+    [string]$FHIROpsStorageAccountName, # Name of the Azure ADLS Gen2 storage account for FHIR operations files
 
     [string]$stoBicepTemplatePath = '.\\infra\\storageAccounts.bicep',
 
@@ -91,10 +95,6 @@ param(
     [string]$StorageAccountSkuName = 'Standard_LRS',
 
     [string]$StorageAccountKind = 'StorageV2',
-
-    [string]$ImageBlobAccountCoreName = 'imgdcm',
-
-    [string]$ImageOperationsAccountCoreName = 'imgops',
 
     [Parameter(Mandatory = $true)]
     [string]$FabricWorkspaceId = "93acd72f-a23e-4b93-968d-c139600891e7",    # Fabric workspace GUID. I will create a REST lookup based on the -hdsWorkspaceName later.
@@ -116,13 +116,7 @@ param(
 
     [switch]$SkipFabricFolders, # explain to skip the creation of Fabric folders portion of the script
 
-    [switch]$SkipFabricShortcuts, # explain to skip the creation of Fabric shortcuts portion of the script
-
-    [switch]$ReuseStorageAccounts, # When set, prompts for existing storage account names to reuse pre-provisioned accounts
-
-    [string]$ExistingBlobStorageAccountName, # Name of existing blob storage account for image files (used with -ReuseStorageAccounts)
-
-    [string]$ExistingOperationsStorageAccountName # Name of existing ADLS Gen2 storage account for operations files (used with -ReuseStorageAccounts)
+    [switch]$SkipFabricShortcuts # explain to skip the creation of Fabric shortcuts portion of the script
 
 )
 
@@ -285,36 +279,6 @@ function Get-InventoryRuleName {
     }
 
     return $ruleName
-}
-
-function Get-SharedStorageAccountName {
-    param(
-        [Parameter(Mandatory = $true)][string]$Prefix,
-        [Parameter(Mandatory = $true)][string]$CoreSegment,
-        [Parameter(Mandatory = $true)][string]$Suffix
-    )
-
-    $composed = "${Prefix}${CoreSegment}${Suffix}"
-    $sanitized = ($composed -replace '[^a-z0-9]', '').ToLowerInvariant()
-    $wasTrimmed = $false
-
-    if ([string]::IsNullOrWhiteSpace($sanitized)) {
-        throw "Storage account name derived from '$Prefix', '$CoreSegment', and '$Suffix' is empty after sanitization."
-    }
-
-    if ($sanitized.Length -gt 24) {
-        $sanitized = $sanitized.Substring(0, 24)
-        $wasTrimmed = $true
-    }
-
-    if ($sanitized.Length -lt 3) {
-        $sanitized = $sanitized.PadRight(3, '0')
-    }
-
-    return [pscustomobject]@{
-        Name = $sanitized
-        WasTrimmed = $wasTrimmed
-    }
 }
 
 function Import-StmoDefinitions {
@@ -543,7 +507,7 @@ function New-MissingInventoryPolicy {
             $filter = New-AzStorageBlobInventoryPolicyRule -Name $definition.RuleName `
                 -Destination $definition.InventoryContainerName `
                 -Format Parquet `
-                -Schedule Weekly `
+                -Schedule Daily `
                 -BlobType blockBlob `
                 -PrefixMatch @($definition.PrefixMatch) `
                 -BlobSchemaField $inventorySchemaFields
@@ -2361,44 +2325,22 @@ foreach ($definition in $stmoDefinitions) {
     Write-Log "Study '$($definition.OriginalName)' sanitized to container '$($definition.ContainerName)' (inventory '$($definition.InventoryContainerName)')." 'DEBUG'
 }
 
-# Determine storage account names based on ReuseStorageAccounts switch
-if ($ReuseStorageAccounts) {
-    Write-Log 'Reuse storage accounts mode enabled.' 'INFO'
-    
-    # Prompt for blob storage account name if not provided
-    if ([string]::IsNullOrWhiteSpace($ExistingBlobStorageAccountName)) {
-        $ExistingBlobStorageAccountName = Read-Host -Prompt 'Enter the name of the existing Blob storage account for DICOM image files'
-        if ([string]::IsNullOrWhiteSpace($ExistingBlobStorageAccountName)) {
-            throw 'Blob storage account name is required when using -ReuseStorageAccounts.'
-        }
-    }
-    
-    # Prompt for operations storage account name if not provided
-    if ([string]::IsNullOrWhiteSpace($ExistingOperationsStorageAccountName)) {
-        $ExistingOperationsStorageAccountName = Read-Host -Prompt 'Enter the name of the existing ADLS Gen2 storage account for FHIR operations files'
-        if ([string]::IsNullOrWhiteSpace($ExistingOperationsStorageAccountName)) {
-            throw 'Operations storage account name is required when using -ReuseStorageAccounts.'
-        }
-    }
-    
-    $imageBlobAccountName = $ExistingBlobStorageAccountName.ToLowerInvariant().Trim()
-    $imageOperationsAccountName = $ExistingOperationsStorageAccountName.ToLowerInvariant().Trim()
-    
-    Write-Log "Using existing blob storage account '$imageBlobAccountName' and operations storage account '$imageOperationsAccountName'." 'INFO'
-} else {
-    $blobAccount = Get-SharedStorageAccountName -Prefix $PrefixName -CoreSegment $ImageBlobAccountCoreName -Suffix $LocationSuffix
-    $operationsAccount = Get-SharedStorageAccountName -Prefix $PrefixName -CoreSegment $ImageOperationsAccountCoreName -Suffix $LocationSuffix
+# Validate and normalize storage account names from parameters
+$imageBlobAccountName = $ImagesStorageAccountName.ToLowerInvariant().Trim()
+$imageOperationsAccountName = $FHIROpsStorageAccountName.ToLowerInvariant().Trim()
 
-    $imageBlobAccountName = $blobAccount.Name
-    $imageOperationsAccountName = $operationsAccount.Name
-
-    if ($blobAccount.WasTrimmed) {
-        Write-Log "Blob storage account name trimmed to '$imageBlobAccountName' to satisfy Azure naming limits." 'WARN'
-    }
-
-    if ($operationsAccount.WasTrimmed) {
-        Write-Log "Operations storage account name trimmed to '$imageOperationsAccountName' to satisfy Azure naming limits." 'WARN'
-    }
+# Validate storage account names meet Azure requirements
+if ($imageBlobAccountName.Length -lt 3 -or $imageBlobAccountName.Length -gt 24) {
+    throw "Images storage account name '$imageBlobAccountName' must be between 3 and 24 characters."
+}
+if ($imageOperationsAccountName.Length -lt 3 -or $imageOperationsAccountName.Length -gt 24) {
+    throw "FHIR Ops storage account name '$imageOperationsAccountName' must be between 3 and 24 characters."
+}
+if ($imageBlobAccountName -notmatch '^[a-z0-9]+$') {
+    throw "Images storage account name '$imageBlobAccountName' must contain only lowercase letters and numbers."
+}
+if ($imageOperationsAccountName -notmatch '^[a-z0-9]+$') {
+    throw "FHIR Ops storage account name '$imageOperationsAccountName' must contain only lowercase letters and numbers."
 }
 
 if ($imageBlobAccountName -eq $imageOperationsAccountName) {
@@ -2434,21 +2376,22 @@ if ([string]::IsNullOrWhiteSpace($trustedWorkspacePrincipalId)) {
 
 Write-Log "Workspace identity '$hdsWorkspaceName' resolved to object ID '$trustedWorkspacePrincipalId'." 'INFO'
 
-# Handle storage account provisioning or validation based on ReuseStorageAccounts switch
-if ($ReuseStorageAccounts) {
-    Write-Log 'Validating and configuring existing storage accounts...' 'INFO'
+# Handle storage account provisioning and configuration
+# Check if storage accounts already exist
+$blobAccountExists = $null -ne (Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $imageBlobAccountName -ErrorAction SilentlyContinue)
+$opsAccountExists = $null -ne (Get-AzStorageAccount -ResourceGroupName $ResourceGroupName -Name $imageOperationsAccountName -ErrorAction SilentlyContinue)
+
+if (-not $SkipStorageDeployment) {
+    # Run Bicep deployment to create or ensure consistency of storage accounts, containers, and policies
+    # Bicep is idempotent - it will create missing resources or update existing ones to match desired state
+    if ($blobAccountExists -and $opsAccountExists) {
+        Write-Log "Both storage accounts already exist. Running Bicep deployment to ensure container and inventory policy consistency..." 'INFO'
+    } elseif ($blobAccountExists -or $opsAccountExists) {
+        Write-Log "One storage account exists but not the other. Running Bicep deployment to create/update both." 'INFO'
+    } else {
+        Write-Log "Storage accounts do not exist. Running Bicep deployment to create them." 'INFO'
+    }
     
-    Confirm-ExistingStorageAccounts `
-        -BlobStorageAccountName $imageBlobAccountName `
-        -OperationsStorageAccountName $imageOperationsAccountName `
-        -ResourceGroupName $ResourceGroupName `
-        -StmoDefinitions $stmoDefinitions `
-        -TrustedWorkspacePrincipalId $trustedWorkspacePrincipalId `
-        -TrustedWorkspacePrincipalType $TrustedWorkspacePrincipalType `
-        -DicomAdminSecurityGroupId $DicomAdmSecGrpId
-    
-    Write-Log 'Existing storage accounts validated and configured successfully.' 'INFO'
-} elseif (-not $SkipStorageDeployment) {
     $stmoTemplateDefinitions = @()
     foreach ($definition in $stmoDefinitions) {
         $stmoTemplateDefinitions += @{
@@ -2475,11 +2418,19 @@ if ($ReuseStorageAccounts) {
         dicomAdminSecurityGroupId       = $DicomAdmSecGrpId
     }
 
-
-        Invoke-StorageDeployment -DeploymentName $DeploymentName -ResourceGroup $ResourceGroupName -TemplatePath $stoBicepTemplatePath -TemplateParameters $templateParameters 
+    Invoke-StorageDeployment -DeploymentName $DeploymentName -ResourceGroup $ResourceGroupName -TemplatePath $stoBicepTemplatePath -TemplateParameters $templateParameters
+    
+    Write-Log 'Storage accounts and configurations deployed/validated successfully via Bicep.' 'INFO'
 } else {
-    if (-not $ReuseStorageAccounts) {
-        Write-Log 'Storage deployment skipped by user request (-SkipStorageDeployment).' 'WARN'
+    # -SkipStorageDeployment was specified - verify storage accounts exist
+    if (-not $blobAccountExists -and -not $opsAccountExists) {
+        throw "Both storage accounts ('$imageBlobAccountName' and '$imageOperationsAccountName') do not exist and -SkipStorageDeployment was specified. Cannot proceed."
+    } elseif (-not $blobAccountExists) {
+        throw "Blob storage account '$imageBlobAccountName' does not exist and -SkipStorageDeployment was specified. Cannot proceed."
+    } elseif (-not $opsAccountExists) {
+        throw "Operations storage account '$imageOperationsAccountName' does not exist and -SkipStorageDeployment was specified. Cannot proceed."
+    } else {
+        Write-Log "Storage deployment skipped by user request. Both storage accounts exist but container/policy consistency is NOT guaranteed." 'WARN'
     }
 }
 

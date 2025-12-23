@@ -145,13 +145,18 @@ sequenceDiagram
 
 ### Storage Account Naming
 
-Storage accounts are named using the pattern: `{prefix}{coreName}{suffix}`
+Storage account names are specified directly via mandatory parameters:
+- `-ImagesStorageAccountName`: Azure Blob storage account for DICOM images and inventory files
+- `-FHIROpsStorageAccountName`: Azure ADLS Gen2 storage account for FHIR operations files
 
-Example with defaults:
+Example:
 - Image blob account: `saimgdcmwu3`
 - Operations account: `saimgopswu3`
 
-Names are sanitized (lowercase, alphanumeric only) and truncated to 24 characters per Azure requirements.
+Storage account names must:
+- Be between 3 and 24 characters
+- Contain only lowercase letters and numbers
+- Be unique within Azure
 
 ### Container Structure
 
@@ -247,6 +252,8 @@ Connect-AzAccount
     -ResourceGroupName "rg-hds-prod" `
     -FacilityCsvPath ".\data\stmos.csv" `
     -hdsWorkspaceName "DICOM-Integration" `
+    -ImagesStorageAccountName "saimgdcmwu3" `
+    -FHIROpsStorageAccountName "saimgopswu3" `
     -FabricWorkspaceId "<fabric-workspace-guid>" `
     -HdsBronzeLakehouse "<lakehouse-guid>" `
     -DicomAdmSecGrpId "<security-group-object-id>"
@@ -264,10 +271,8 @@ Connect-AzAccount
     -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
     -ResourceGroupName rg-DICOM `
     -hdsWorkspaceName DICOM-Integration `
-    -PrefixName sa `
-    -LocationSuffix wu3 `
-    -ImageBlobAccountCoreName imgdcm `
-    -ImageOperationsAccountCoreName imgops `
+    -ImagesStorageAccountName saimgdcmwu3 `
+    -FHIROpsStorageAccountName saimgopswu3 `
     -stoBicepTemplatePath '.\infra\storageAccounts.bicep' `
     -DeploymentName hds-storage-provisioning `
     -StorageAccountSkuName Standard_LRS `
@@ -291,6 +296,8 @@ Connect-AzAccount
     -location westus3 `
     -ResourceGroupName rg-DICOM `
     -hdsWorkspaceName DICOM-Integration `
+    -ImagesStorageAccountName "saimgdcmwu3" `
+    -FHIROpsStorageAccountName "saimgopswu3" `
     -FabricWorkspaceId "<fabric-workspace-guid>" `
     -HdsBronzeLakehouse "<lakehouse-guid>" `
     -DicomAdmSecGrpId "<security-group-object-id>" `
@@ -308,31 +315,18 @@ Connect-AzAccount
     -location westus3 `
     -ResourceGroupName rg-DICOM `
     -hdsWorkspaceName DICOM-Integration `
+    -ImagesStorageAccountName "saimgdcmwu3" `
+    -FHIROpsStorageAccountName "saimgopswu3" `
     -FabricWorkspaceId "<fabric-workspace-guid>" `
     -HdsBronzeLakehouse "<lakehouse-guid>" `
     -DicomAdmSecGrpId "<security-group-object-id>" `
     -SkipStorageDeployment
 ```
 
-**Reuse existing storage accounts** (validates, configures containers, RBAC, and ACLs):
-
-```powershell
-.\hds-dicom-infra.ps1 `
-    -FacilityCsvPath .\example-stmos.csv `
-    -TenantId "<tenant-guid>" `
-    -SubscriptionId "<subscription-guid>" `
-    -location westus3 `
-    -ResourceGroupName rg-DICOM `
-    -hdsWorkspaceName DICOM-Integration `
-    -FabricWorkspaceId "<fabric-workspace-guid>" `
-    -HdsBronzeLakehouse "<lakehouse-guid>" `
-    -DicomAdmSecGrpId "<security-group-object-id>" `
-    -ReuseStorageAccounts `
-    -ExistingBlobStorageAccountName "myexistingblobaccount" `
-    -ExistingOperationsStorageAccountName "myexistingadlsaccount"
-```
-
-> **Note:** When using `-ReuseStorageAccounts` without specifying account names, the script will prompt interactively. The operations account **must** have Hierarchical Namespace (ADLS Gen2) enabled or the script will fail.
+> **Storage Account Behavior:**
+> - **If both accounts exist**: The script validates them and ensures all containers, inventory policies, RBAC roles, and ADLS Gen2 ACLs are configured based on the STMO definitions in your CSV. No Bicep deployment is run.
+> - **If accounts don't exist**: The script runs Bicep deployment to create them with all required resources.
+> - **`-SkipStorageDeployment`**: Prevents Bicep deployment from running. If storage accounts don't exist, the script will fail with an error. Use this when you want to skip storage provisioning entirely (e.g., for Fabric-only operations on pre-configured storage).
 
 ### Key Parameters
 
@@ -344,20 +338,17 @@ Connect-AzAccount
 | `-ResourceGroupName` | Target resource group name | *Required* |
 | `-FacilityCsvPath` | Path to CSV file containing STMO definitions | *Required* |
 | `-hdsWorkspaceName` | Display name of the Fabric workspace (used to resolve managed identity) | *Required* |
+| `-ImagesStorageAccountName` | Name of the Azure Blob storage account for DICOM images and inventory files | *Required* |
+| `-FHIROpsStorageAccountName` | Name of the Azure ADLS Gen2 storage account for FHIR operations files | *Required* |
 | `-FabricWorkspaceId` | GUID of the target Fabric workspace | *Required* |
 | `-HdsBronzeLakehouse` | GUID of the target lakehouse | *Required* |
 | `-DicomAdmSecGrpId` | Object ID of the DICOM administrators security group | *Required* |
-| `-PrefixName` | Storage account name prefix | `sa` |
-| `-LocationSuffix` | Storage account name suffix (typically region abbreviation) | `wu3` |
-| `-ImageBlobAccountCoreName` | Core segment for blob storage account name | `imgdcm` |
-| `-ImageOperationsAccountCoreName` | Core segment for operations storage account name | `imgops` |
 | `-StorageAccountSkuName` | SKU for storage accounts | `Standard_LRS` |
 | `-StorageAccountKind` | Storage account kind | `StorageV2` |
 | `-GlobalTags` | Hashtable of tags applied to all storage accounts | `@{}` |
 | `-SkipStorageDeployment` | Skip Azure storage account/container provisioning | `$false` |
 | `-SkipFabricFolders` | Skip lakehouse folder creation | `$false` |
 | `-SkipFabricShortcuts` | Skip Fabric connection and shortcut creation | `$false` |
-| `-ReuseStorageAccounts` | Reuse pre-provisioned storage accounts instead of deploying new ones | `$false` |
 | `-ExistingBlobStorageAccountName` | Name of existing blob storage account (used with `-ReuseStorageAccounts`) | – |
 | `-ExistingOperationsStorageAccountName` | Name of existing ADLS Gen2 storage account (used with `-ReuseStorageAccounts`) | – |
 | `-WhatIf` | Preview Bicep deployment without applying changes | – |
@@ -525,15 +516,23 @@ All notable changes to this project will be documented in this section.
 - Fixed `singleSignOnType` from `ManagedIdentity` to `None` for ADLS connections (required for workspace identity auth)
 - Fixed inventory shortcuts to use blob storage instead of ADLS Gen2 (inventory containers are on the blob storage account)
 
-### [1.2.0] - 2025-12-XX
-
-#### Added
-- `-ReuseStorageAccounts` switch for using pre-provisioned storage accounts
-- Storage account validation and container creation for reuse mode
-- ADLS Gen2 ACL management with recursive cascading
+### [1.4.0] - 2025-12-23
 
 #### Changed
-- Updated module requirements to include `Az.Storage` for container and ACL management
+- **Breaking**: Replaced dynamic storage account naming with mandatory explicit parameters
+  - Removed: `-PrefixName`, `-LocationSuffix`, `-ImageBlobAccountCoreName`, `-ImageOperationsAccountCoreName`
+  - Removed: `-ReuseStorageAccounts`, `-ExistingBlobStorageAccountName`, `-ExistingOperationsStorageAccountName`
+  - Added: `-ImagesStorageAccountName` (mandatory) - Name of Azure Blob storage account for DICOM images and inventory
+  - Added: `-FHIROpsStorageAccountName` (mandatory) - Name of Azure ADLS Gen2 storage account for FHIR operations
+- **Bicep-driven consistency**: Script now always uses Bicep deployment to ensure storage account configuration consistency:
+  - Bicep is idempotent - creates missing resources or updates existing ones to match desired state
+  - Containers, inventory policies, and RBAC assignments are defined in Bicep templates
+  - `-SkipStorageDeployment` now warns that container/policy consistency is NOT guaranteed when skipped
+- **Inventory schedule**: Changed blob inventory schedule from Weekly to Daily in both Bicep template and PowerShell
+- Removed `Get-SharedStorageAccountName` function (no longer needed)
+
+#### Added
+- Storage account name validation (3-24 chars, lowercase alphanumeric only)
 
 ### [1.1.0] - 2025-12-06
 

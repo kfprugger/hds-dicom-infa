@@ -79,7 +79,7 @@ resource inventoryPolicy 'Microsoft.Storage/storageAccounts/inventoryPolicies@20
         definition: {
           objectType: 'Blob'
           format: 'Parquet'
-          schedule: 'Weekly'
+          schedule: 'Daily'
           schemaFields: inventorySchemaFields
           filters: {
             blobTypes: [

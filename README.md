@@ -18,10 +18,12 @@ The solution orchestrates five responsibilities:
 4. **Trusted workspace identity** – Automatically assigns the Fabric workspace's managed identity and a DICOM administrators security group the Storage Blob Data Contributor role on each provisioned storage account.
 
 5. **Fabric lakehouse integration** – Creates standardized folder structures and shortcuts in the target Fabric lakehouse:
-   - **Folders**: `/Files/Ingest/Imaging/DICOM/{stmo}/InventoryFiles`
-   - **Image shortcuts**: Links blob containers to the lakehouse for direct image access
-   - **Operations shortcuts**: Links ADLS Gen2 containers for inventory file access via `/Files/External/Imaging/DICOM/Operations/`
+   - **Folders**: `/Files/Inventory/Imaging/DICOM/DICOM-HDS/` and `/Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles/`
+   - **Image shortcuts**: Links blob containers to the lakehouse at `/Files/Inventory/Imaging/DICOM/DICOM-HDS/{stmo}`
+   - **Inventory shortcuts**: Links inventory containers (`-inv`) at `/Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles/{stmo}-inventory`
+   - **Operations shortcuts**: Links ADLS Gen2 containers for processing via `/Files/External/Imaging/DICOM/Operations/`
    - **Connections**: Creates workspace-scoped Fabric connections using workspace managed identity authentication
+   - **Conflict resolution**: Handles shortcut conflicts with interactive prompts (auto-selects "Keep" after 10 seconds of no input)
 
 ## Architecture
 
@@ -61,13 +63,13 @@ flowchart TB
             
             subgraph Lakehouse["Bronze Lakehouse"]
                 subgraph Files["Files/"]
-                    subgraph Ingest["Ingest/Imaging/DICOM/"]
-                        IF1["stmo1/"]
-                        IF1Inv["└─ InventoryFiles/"]
-                        IF2["stmo2/"]
-                        IF2Inv["└─ InventoryFiles/"]
-                        IS1{{"Image Shortcut → stmo1"}}
-                        IS2{{"Image Shortcut → stmo2"}}
+                    subgraph Inventory["Inventory/Imaging/DICOM/DICOM-HDS/"]
+                        IS1{{"stmo1 (Image Shortcut)"}}
+                        IS2{{"stmo2 (Image Shortcut)"}}
+                        subgraph InvFiles["InventoryFiles/"]
+                            INV1{{"stmo1-inventory (Shortcut)"}}
+                            INV2{{"stmo2-inventory (Shortcut)"}}
+                        end
                     end
                     subgraph External["External/Imaging/DICOM/Operations/"]
                         OS1{{"Ops Shortcut → stmo1"}}
@@ -170,15 +172,15 @@ For each STMO (e.g., "STMO 5" → sanitized to "stmo-5"):
 
 ```
 Files/
-├── Ingest/
+├── Inventory/
 │   └── Imaging/
 │       └── DICOM/
-│           ├── stmo1/
-│           │   ├── InventoryFiles/
-│           │   └── [Image Shortcut → Blob Container]
-│           └── stmo2/
-│               ├── InventoryFiles/
-│               └── [Image Shortcut → Blob Container]
+│           └── DICOM-HDS/
+│               ├── stmo1/           [Image Shortcut → Blob Container stmo1]
+│               ├── stmo2/           [Image Shortcut → Blob Container stmo2]
+│               └── InventoryFiles/
+│                   ├── stmo1-inventory/  [Shortcut → Blob Container stmo1-inv]
+│                   └── stmo2-inventory/  [Shortcut → Blob Container stmo2-inv]
 └── External/
     └── Imaging/
         └── DICOM/
@@ -497,6 +499,40 @@ All notable changes to this project will be documented in this section.
 
 #### Changed
 - Operations storage account now requires ADLS Gen2 (HNS enabled) – validation failure instead of warning
+- Updated module requirements to include `Az.Storage` for container and ACL management
+
+### [1.3.0] - 2025-12-23
+
+#### Changed
+- **Lakehouse folder structure**: Reorganized from `/Files/Ingest/Imaging/DICOM/{stmo}/` to `/Files/Inventory/Imaging/DICOM/DICOM-HDS/`
+- **Image shortcuts**: Now placed directly at `/Files/Inventory/Imaging/DICOM/DICOM-HDS/{stmo}` (no nested folder per STMO)
+- **Inventory shortcuts**: Moved to dedicated subfolder at `/Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles/{stmo}-inventory`
+- **Inventory shortcut targets**: Now use Azure Blob Storage (`azureBlobStorage`) instead of ADLS Gen2, pointing to the same blob storage account as image shortcuts with `-inv` container suffix
+
+#### Added
+- **Shortcut conflict resolution**: Interactive prompt when creating shortcuts that already exist with options:
+  - `[K]` Keep existing shortcut and continue (default)
+  - `[R]` Replace - delete existing and create new
+  - `[A]` Abort - stop script execution
+- **Auto-select timeout**: Conflict resolution prompts auto-select "Keep" after 10 seconds of no user input for automation-friendly execution
+- **DICOM-HDS base folder**: Script now creates the `/Files/Inventory/Imaging/DICOM/DICOM-HDS` folder if it doesn't exist before creating shortcuts
+- **Tenant-scoped connection lookup**: Checks for both workspace-scoped and tenant-scoped Fabric connections before creating new ones
+- **409 conflict handling**: Gracefully handles `DuplicateConnectionName` errors by looking up existing connections
+- **404 delete handling**: Treats 404 errors on shortcut deletion as success (shortcut already gone)
+- **API propagation delay**: 10-second wait after shortcut deletion before retry to allow Fabric API to propagate changes
+
+#### Fixed
+- Fixed `singleSignOnType` from `ManagedIdentity` to `None` for ADLS connections (required for workspace identity auth)
+- Fixed inventory shortcuts to use blob storage instead of ADLS Gen2 (inventory containers are on the blob storage account)
+
+### [1.2.0] - 2025-12-XX
+
+#### Added
+- `-ReuseStorageAccounts` switch for using pre-provisioned storage accounts
+- Storage account validation and container creation for reuse mode
+- ADLS Gen2 ACL management with recursive cascading
+
+#### Changed
 - Updated module requirements to include `Az.Storage` for container and ACL management
 
 ### [1.1.0] - 2025-12-06

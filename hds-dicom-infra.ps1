@@ -38,8 +38,8 @@
     More info: https://github.com/kfprugger/hds-dicom-infra
 #>
 
-# .\hds-dicom-infra.ps1 
-# `-FacilityCsvPath .\example-stmos.csv `
+# .\hds-dicom-infra.ps1 `
+#   -FacilityCsvPath .\example-stmos.csv `
 # -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 
 # -location westus3 `
 # -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f 
@@ -1155,29 +1155,29 @@ function New-FabricInventoryFolders {
     $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
     $endpointRoot = $Endpoint.TrimEnd('/')
 
-    foreach ($definition in $StmoDefinitions) {
-        $containerName = $definition.ContainerName
-        $ingestStudyPath = @('Ingest', 'Imaging', 'DICOM', $containerName)
-        $ingestStudyRelative = ($ingestStudyPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
-        $ingestStudyUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $ingestStudyRelative
+    # Base path for DICOM HDS shortcuts: /Files/Inventory/Imaging/DICOM/DICOM-HDS
+    $dicomHdsPath = @('Inventory', 'Imaging', 'DICOM', 'DICOM-HDS')
+    $dicomHdsRelative = ($dicomHdsPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+    $dicomHdsUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $dicomHdsRelative
 
-        if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $ingestStudyPath -AccessToken $AccessToken) {
-            Write-Log "Lakehouse study folder already exists: $ingestStudyUri" 'INFO'
-        } else {
-            Write-Log "Creating lakehouse study folder: $ingestStudyUri" 'INFO'
-            New-OneLakeDirectory -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $ingestStudyPath -AccessToken $AccessToken
-        }
+    # Create /Files/Inventory/Imaging/DICOM/DICOM-HDS if it doesn't exist
+    if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $dicomHdsPath -AccessToken $AccessToken) {
+        Write-Log "DICOM-HDS base folder already exists: $dicomHdsUri" 'INFO'
+    } else {
+        Write-Log "Creating DICOM-HDS base folder: $dicomHdsUri" 'INFO'
+        New-LakehouseDirectoryPath -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $dicomHdsPath -AccessToken $AccessToken
+    }
 
-        $inventoryPath = $ingestStudyPath + @('InventoryFiles')
-        $inventoryRelative = ($inventoryPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
-        $inventoryUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $inventoryRelative
+    # Create InventoryFiles subfolder under DICOM-HDS (shared for all STMO inventory shortcuts)
+    $inventoryFilesPath = $dicomHdsPath + @('InventoryFiles')
+    $inventoryFilesRelative = ($inventoryFilesPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+    $inventoryFilesUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $inventoryFilesRelative
 
-        if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryPath -AccessToken $AccessToken) {
-            Write-Log "Inventory subfolder already exists: $inventoryUri" 'INFO'
-        } else {
-            Write-Log "Creating inventory subfolder: $inventoryUri" 'INFO'
-            New-OneLakeDirectory -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryPath -AccessToken $AccessToken
-        }
+    if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesPath -AccessToken $AccessToken) {
+        Write-Log "InventoryFiles folder already exists: $inventoryFilesUri" 'INFO'
+    } else {
+        Write-Log "Creating InventoryFiles folder: $inventoryFilesUri" 'INFO'
+        New-OneLakeDirectory -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesPath -AccessToken $AccessToken
     }
 }
 
@@ -1658,9 +1658,16 @@ function New-FabricAdlsConnection {
     )
 
     $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
+    if (-not $existing) {
+        # Also check for tenant-scoped connections
+        $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
+        if ($existing) {
+            Write-Log "Found tenant-scoped Fabric ADLS connection '$DisplayName'; reusing it." 'INFO'
+        }
+    }
     if ($existing -and $existing.PSObject.Properties['id']) {
         $existingId = [string]$existing.id
-        Write-Log "Reusing Fabric connection '$DisplayName' (ID: $existingId)." 'INFO'
+        Write-Log "Reusing Fabric ADLS connection '$DisplayName' (ID: $existingId)." 'INFO'
         return $existingId
     }
 
@@ -1859,7 +1866,7 @@ function New-FabricAdlsConnection {
     }
 
     $credentialDetails = @{
-        singleSignOnType      = 'ManagedIdentity'
+        singleSignOnType      = 'None'
         connectionEncryption  = $encryptionOption
         skipTestConnection    = $false
         credentials = @{
@@ -1889,6 +1896,20 @@ function New-FabricAdlsConnection {
         $result = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create ADLS Gen2 connection '$DisplayName'"
     } catch {
         $message = $_.Exception.Message
+        # Handle 409 DuplicateConnectionName - the connection may have been created by another process
+        if ($message -match '409|DuplicateConnectionName') {
+            Write-Log "Connection '$DisplayName' already exists (409 conflict). Attempting to retrieve existing connection..." 'WARN'
+            # Try to find the existing connection again
+            $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
+            if (-not $existingRetry) {
+                $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
+            }
+            if ($existingRetry -and $existingRetry.PSObject.Properties['id']) {
+                $existingId = [string]$existingRetry.id
+                Write-Log "Found existing Fabric ADLS connection '$DisplayName' (ID: $existingId) after conflict." 'INFO'
+                return $existingId
+            }
+        }
         Write-Log "Failed to create Fabric connection '$DisplayName': $message" 'ERROR'
         throw
     }
@@ -1948,6 +1969,128 @@ function Get-FabricShortcutByName {
     return $null
 }
 
+function Remove-FabricShortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$AccessToken,
+        [Parameter(Mandatory = $true)][string]$WorkspaceId,
+        [Parameter(Mandatory = $true)][string]$LakehouseId,
+        [Parameter(Mandatory = $true)][string]$ShortcutName,
+        [Parameter(Mandatory = $true)][string]$ShortcutPath
+    )
+
+    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
+    $workspaceIdEncoded = [Uri]::EscapeDataString($WorkspaceId)
+    $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
+    $shortcutNameEncoded = [Uri]::EscapeDataString($ShortcutName)
+    $shortcutPathEncoded = [Uri]::EscapeDataString($ShortcutPath)
+    $uri = "$($Endpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts/$shortcutPathEncoded/$shortcutNameEncoded"
+
+    try {
+        Invoke-FabricApiRequest -Method 'Delete' -Uri $uri -Headers $headers -Description "Delete shortcut '$ShortcutName' at '$ShortcutPath'"
+        Write-Log "Deleted Fabric shortcut '$ShortcutName' at '$ShortcutPath'." 'INFO'
+        return $true
+    } catch {
+        $errorMessage = $_.Exception.Message
+        # Treat 404 as success - shortcut is already gone
+        if ($errorMessage -match '404|EntityNotFound|ShortcutNotFound') {
+            Write-Log "Shortcut '$ShortcutName' at '$ShortcutPath' was already deleted or does not exist." 'INFO'
+            return $true
+        }
+        Write-Log "Failed to delete Fabric shortcut '$ShortcutName' at '$ShortcutPath': $errorMessage" 'ERROR'
+        return $false
+    }
+}
+
+function Resolve-ShortcutConflict {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$AccessToken,
+        [Parameter(Mandatory = $true)][string]$WorkspaceId,
+        [Parameter(Mandatory = $true)][string]$LakehouseId,
+        [Parameter(Mandatory = $true)][string]$ShortcutName,
+        [Parameter(Mandatory = $true)][string]$ShortcutPath,
+        [int]$TimeoutSeconds = 10
+    )
+
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host "SHORTCUT CONFLICT DETECTED" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "A shortcut with the name '$ShortcutName' already exists at path '$ShortcutPath'." -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Options:" -ForegroundColor White
+    Write-Host "  [K] Keep existing shortcut and continue (DEFAULT - auto-selected in $TimeoutSeconds seconds)" -ForegroundColor Green
+    Write-Host "  [R] Replace - Delete existing shortcut and create new one" -ForegroundColor Yellow
+    Write-Host "  [A] Abort - Stop the script execution" -ForegroundColor Red
+    Write-Host ""
+
+    # Timed input with default selection
+    $choice = $null
+    $lastDisplayedSeconds = -1
+    $startTime = [DateTime]::Now
+    $endTime = $startTime.AddSeconds($TimeoutSeconds)
+    
+    Write-Host "Enter your choice (K/R/A) [Default: K in $TimeoutSeconds seconds]: " -NoNewline
+    
+    while ([DateTime]::Now -lt $endTime) {
+        if ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            $choice = $key.KeyChar.ToString().ToUpper().Trim()
+            if ($choice -in @('K', 'R', 'A')) {
+                Write-Host $choice
+                break
+            } elseif ($key.Key -eq 'Enter') {
+                # User pressed Enter without a choice - use default
+                $choice = 'K'
+                Write-Host "K (default)"
+                break
+            }
+        }
+        
+        $remainingSeconds = [Math]::Ceiling(($endTime - [DateTime]::Now).TotalSeconds)
+        if ($remainingSeconds -ge 0 -and $remainingSeconds -ne $lastDisplayedSeconds) {
+            $lastDisplayedSeconds = $remainingSeconds
+            # Update countdown on same line
+            Write-Host "`r" -NoNewline
+            Write-Host "Enter your choice (K/R/A) [Default: K in $remainingSeconds seconds]: " -NoNewline
+        }
+        
+        Start-Sleep -Milliseconds 100
+    }
+    
+    if (-not $choice) {
+        $choice = 'K'
+        Write-Host ""
+        Write-Log "No input received within $TimeoutSeconds seconds. Auto-selecting 'Keep' (K)." 'INFO'
+    }
+
+    switch ($choice) {
+        'K' {
+            Write-Log "User chose to keep existing shortcut '$ShortcutName' at '$ShortcutPath'." 'INFO'
+            return 'Keep'
+        }
+        'R' {
+            Write-Log "User chose to replace shortcut '$ShortcutName' at '$ShortcutPath'." 'INFO'
+            $deleted = Remove-FabricShortcut -Endpoint $Endpoint -AccessToken $AccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $ShortcutName -ShortcutPath $ShortcutPath
+            if ($deleted) {
+                # Wait for API propagation before retrying creation
+                Write-Log "Waiting 10 seconds for Fabric API to propagate shortcut deletion..." 'INFO'
+                Start-Sleep -Seconds 10
+                return 'Replace'
+            } else {
+                Write-Log "Failed to delete existing shortcut. Cannot proceed with replacement." 'ERROR'
+                throw "Unable to delete existing shortcut '$ShortcutName' at '$ShortcutPath'."
+            }
+        }
+        'A' {
+            Write-Log "User chose to abort due to shortcut conflict." 'WARN'
+            throw "Script aborted by user due to shortcut conflict for '$ShortcutName' at '$ShortcutPath'."
+        }
+    }
+}
+
 function New-FabricImageShortcuts {
     param(
         [Parameter(Mandatory = $true)][string]$OneLakeEndpoint,
@@ -1958,7 +2101,8 @@ function New-FabricImageShortcuts {
         [Parameter(Mandatory = $true)][string]$FabricAccessToken,
         [Parameter(Mandatory = $true)][psobject[]]$StmoDefinitions,
         [Parameter(Mandatory = $true)][string]$BlobStorageAccountName,
-        [Parameter(Mandatory = $true)][string]$BlobConnectionDisplayName
+        [Parameter(Mandatory = $true)][string]$BlobConnectionDisplayName,
+        [Parameter(Mandatory = $true)][string]$InventoryStorageAccountName
     )
 
     if (-not $StmoDefinitions -or $StmoDefinitions.Count -eq 0) {
@@ -1967,16 +2111,20 @@ function New-FabricImageShortcuts {
     }
 
     $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
-    $basePath = '/Files/Ingest/Imaging/DICOM'
+
+    # New layout: /Files/Inventory/Imaging/DICOM/DICOM-HDS for STMO shortcuts
+    $basePath = '/Files/Inventory/Imaging/DICOM/DICOM-HDS'
     $baseSegments = Get-LakehousePathSegments -FullPath $basePath
-    if ($baseSegments.Count -gt 0) {
-        New-LakehouseDirectoryPath -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $baseSegments -AccessToken $OneLakeAccessToken
-    }
+
+    # InventoryFiles subfolder for inventory shortcuts
+    $inventoryFilesPath = '/Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles'
+    $inventoryFilesSegments = Get-LakehousePathSegments -FullPath $inventoryFilesPath
 
     $blobEndpoint = "https://$BlobStorageAccountName.blob.core.windows.net"
     $defaultContainer = $StmoDefinitions | Select-Object -First 1
     $defaultContainerName = if ($defaultContainer -and $defaultContainer.PSObject.Properties['ContainerName']) { [string]$defaultContainer.ContainerName } else { $null }
 
+    # Blob connection for STMO image containers
     $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName -WorkspaceId $WorkspaceId
     if (-not $existingBlobConnection) {
         $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName
@@ -2011,43 +2159,105 @@ function New-FabricImageShortcuts {
             continue
         }
 
-        $pathSegments = @($baseSegments + $containerName)
-        if ($pathSegments.Count -gt 0) {
-            New-LakehouseDirectoryPath -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $pathSegments -AccessToken $OneLakeAccessToken
-        }
-
-        $shortcutPath = "Files/Ingest/Imaging/DICOM/$containerName"
+        # Create STMO image shortcut directly at /Files/Inventory/Imaging/DICOM/DICOM-HDS/{containerName}
+        $shortcutPath = "Files/Inventory/Imaging/DICOM/DICOM-HDS"
         $existingShortcut = Get-FabricShortcutByName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $containerName -ShortcutPath $shortcutPath
 
         if ($existingShortcut) {
             Write-Log "Image shortcut '$containerName' already exists at '$shortcutPath'." 'INFO'
-            continue
-        }
+        } else {
+            $body = @{
+                path = $shortcutPath
+                name = $containerName
+                target = @{
+                    azureBlobStorage = @{
+                        location = $blobEndpoint
+                        subpath  = "/$containerName"
+                        connectionId = $connectionId
+                    }
+                }
+            }
 
-        $body = @{
-            path = $shortcutPath
-            name = $containerName
-            target = @{
-                azureBlobStorage = @{
-                    location = $blobEndpoint
-                    subpath  = "/$containerName"
-                    connectionId = $connectionId
+            $headers = Get-FabricApiHeaders -AccessToken $FabricAccessToken
+            $workspaceIdEncoded = [Uri]::EscapeDataString($WorkspaceId)
+            $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
+            $uri = "$($FabricEndpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts?shortcutConflictPolicy=Abort"
+
+            $retryCreate = $true
+            while ($retryCreate) {
+                $retryCreate = $false
+                try {
+                    Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create image shortcut '$containerName'"
+                    Write-Log "Created Fabric image shortcut '$containerName' -> '$blobEndpoint/$containerName'." 'INFO'
+                } catch {
+                    $errorMessage = $_.Exception.Message
+                    # Check for 409 conflict (shortcut already exists)
+                    if ($errorMessage -match '409|EntityConflict|ShorcutsOperationNotAllowed|shortcut.*already exists') {
+                        Write-Log "Shortcut conflict detected for '$containerName' at '$shortcutPath'." 'WARN'
+                        $resolution = Resolve-ShortcutConflict -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $containerName -ShortcutPath $shortcutPath
+                        if ($resolution -eq 'Replace') {
+                            $retryCreate = $true
+                        }
+                        # If 'Keep', we just continue without retrying
+                    } else {
+                        Write-Log "Failed to create image shortcut '$containerName': $errorMessage" 'ERROR'
+                        throw
+                    }
                 }
             }
         }
 
-        $headers = Get-FabricApiHeaders -AccessToken $FabricAccessToken
-        $workspaceIdEncoded = [Uri]::EscapeDataString($WorkspaceId)
-        $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
-        $uri = "$($FabricEndpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts?shortcutConflictPolicy=Abort"
+        # Create inventory shortcut at /Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles/{containerName}-inventory
+        # Inventory containers (-inv) are on the same blob storage account as the STMO image containers
+        $inventoryContainerName = "$containerName-inv"
+        $inventoryShortcutName = "$containerName-inventory"
+        $inventoryShortcutPath = "Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles"
 
-        try {
-            Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create image shortcut '$containerName'"
-            Write-Log "Created Fabric image shortcut '$containerName' -> '$blobEndpoint/$containerName'." 'INFO'
-        } catch {
-            $errorMessage = "Failed to create image shortcut '$containerName': $($_.Exception.Message)"
-            Write-Log $errorMessage 'ERROR'
-            throw
+        $existingInventoryShortcut = Get-FabricShortcutByName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $inventoryShortcutName -ShortcutPath $inventoryShortcutPath
+
+        if ($existingInventoryShortcut) {
+            Write-Log "Inventory shortcut '$inventoryShortcutName' already exists at '$inventoryShortcutPath'." 'INFO'
+        } else {
+            # Use the same blob connection as the image shortcuts (inventory is on the same blob storage account)
+            $inventoryBody = @{
+                path = $inventoryShortcutPath
+                name = $inventoryShortcutName
+                target = @{
+                    azureBlobStorage = @{
+                        location = $blobEndpoint
+                        subpath  = "/$inventoryContainerName"
+                        connectionId = $connectionId
+                    }
+                }
+            }
+
+            $headers = Get-FabricApiHeaders -AccessToken $FabricAccessToken
+            $workspaceIdEncoded = [Uri]::EscapeDataString($WorkspaceId)
+            $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
+            $uri = "$($FabricEndpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts?shortcutConflictPolicy=Abort"
+
+            $retryCreate = $true
+            while ($retryCreate) {
+                $retryCreate = $false
+                try {
+                    Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $inventoryBody -Description "Create inventory shortcut '$inventoryShortcutName'"
+                    Write-Log "Created Fabric inventory shortcut '$inventoryShortcutName' -> '$blobEndpoint/$inventoryContainerName'." 'INFO'
+                } catch {
+                    $errorMessage = $_.Exception.Message
+                    # Check for 409 conflict (shortcut already exists)
+                    if ($errorMessage -match '409|EntityConflict|ShorcutsOperationNotAllowed|shortcut.*already exists') {
+                        Write-Log "Shortcut conflict detected for '$inventoryShortcutName' at '$inventoryShortcutPath'." 'WARN'
+                        $resolution = Resolve-ShortcutConflict -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $inventoryShortcutName -ShortcutPath $inventoryShortcutPath
+                        if ($resolution -eq 'Replace') {
+                            $retryCreate = $true
+                        }
+                        # If 'Keep', we just continue without retrying
+                    } else {
+                        Write-Log "Failed to create inventory shortcut '$inventoryShortcutName': $errorMessage" 'ERROR'
+                        throw
+                    }
+                }
+            }
         }
     }
 }
@@ -2109,14 +2319,28 @@ function New-FabricInventoryShortcuts {
         $lakehouseIdEncoded = [Uri]::EscapeDataString($LakehouseId)
         $uri = "$($FabricEndpoint.TrimEnd('/'))/v1/workspaces/$workspaceIdEncoded/items/$lakehouseIdEncoded/shortcuts?shortcutConflictPolicy=Abort"
 
-        try {
-            Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create shortcut '$shortcutName'"
-            $successMessage = "Created Fabric shortcut '$shortcutName' -> '$storageLocation$containerSubpath'."
-            Write-Log $successMessage 'INFO'
-        } catch {
-            $errorMessage = "Failed to create shortcut '$shortcutName': $($_.Exception.Message)"
-            Write-Log $errorMessage 'ERROR'
-            throw
+        $retryCreate = $true
+        while ($retryCreate) {
+            $retryCreate = $false
+            try {
+                Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create shortcut '$shortcutName'"
+                $successMessage = "Created Fabric shortcut '$shortcutName' -> '$storageLocation$containerSubpath'."
+                Write-Log $successMessage 'INFO'
+            } catch {
+                $errorMessage = $_.Exception.Message
+                # Check for 409 conflict (shortcut already exists)
+                if ($errorMessage -match '409|EntityConflict|ShorcutsOperationNotAllowed|shortcut.*already exists') {
+                    Write-Log "Shortcut conflict detected for '$shortcutName' at '$shortcutPath'." 'WARN'
+                    $resolution = Resolve-ShortcutConflict -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $shortcutName -ShortcutPath $shortcutPath
+                    if ($resolution -eq 'Replace') {
+                        $retryCreate = $true
+                    }
+                    # If 'Keep', we just continue without retrying
+                } else {
+                    Write-Log "Failed to create shortcut '$shortcutName': $errorMessage" 'ERROR'
+                    throw
+                }
+            }
         }
     }
 }
@@ -2284,7 +2508,7 @@ if (-not $SkipFabricShortcuts) {
 
     $blobConnectionDisplayName = "fab-$imageBlobAccountName-blob-conn"
 
-    New-FabricImageShortcuts -OneLakeEndpoint $FabricApiEndpoint -FabricEndpoint $FabricManagementEndpoint -WorkspaceId $FabricWorkspaceId -LakehouseId $HdsBronzeLakehouse -OneLakeAccessToken $oneLakeAccessToken -FabricAccessToken $fabricApiAccessToken -StmoDefinitions $stmoDefinitions -BlobStorageAccountName $imageBlobAccountName -BlobConnectionDisplayName $blobConnectionDisplayName
+    New-FabricImageShortcuts -OneLakeEndpoint $FabricApiEndpoint -FabricEndpoint $FabricManagementEndpoint -WorkspaceId $FabricWorkspaceId -LakehouseId $HdsBronzeLakehouse -OneLakeAccessToken $oneLakeAccessToken -FabricAccessToken $fabricApiAccessToken -StmoDefinitions $stmoDefinitions -BlobStorageAccountName $imageBlobAccountName -BlobConnectionDisplayName $blobConnectionDisplayName -InventoryStorageAccountName $imageOperationsAccountName
 
     New-FabricInventoryShortcuts -OneLakeEndpoint $FabricApiEndpoint -FabricEndpoint $FabricManagementEndpoint -WorkspaceId $FabricWorkspaceId -LakehouseId $HdsBronzeLakehouse -OneLakeAccessToken $oneLakeAccessToken -FabricAccessToken $fabricApiAccessToken -StmoDefinitions $stmoDefinitions -OperationsPath $LakehouseOperationsPath -InventoryStorageAccountName $imageOperationsAccountName
     Write-Log 'Fabric image and operations shortcuts created or verified successfully.' 'INFO'

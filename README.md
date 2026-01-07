@@ -275,7 +275,7 @@ Connect-AzAccount
     -FHIROpsStorageAccountName saimgopswu3 `
     -stoBicepTemplatePath '.\infra\storageAccounts.bicep' `
     -DeploymentName hds-storage-provisioning `
-    -StorageAccountSkuName Standard_LRS `
+    -StorageAccountSkuName Standard_ZRS `
     -StorageAccountKind StorageV2 `
     -FabricWorkspaceId 93acd72f-a23e-4b93-968d-c139600891e7 `
     -HdsBronzeLakehouse 74f52728-9f52-456f-aeb0-a9e250371087 `
@@ -343,7 +343,7 @@ Connect-AzAccount
 | `-FabricWorkspaceId` | GUID of the target Fabric workspace | *Required* |
 | `-HdsBronzeLakehouse` | GUID of the target lakehouse | *Required* |
 | `-DicomAdmSecGrpId` | Object ID of the DICOM administrators security group | *Required* |
-| `-StorageAccountSkuName` | SKU for storage accounts | `Standard_LRS` |
+| `-StorageAccountSkuName` | SKU for storage accounts | `Standard_ZRS` |
 | `-StorageAccountKind` | Storage account kind | `StorageV2` |
 | `-GlobalTags` | Hashtable of tags applied to all storage accounts | `@{}` |
 | `-SkipStorageDeployment` | Skip Azure storage account/container provisioning | `$false` |
@@ -529,6 +529,8 @@ All notable changes to this project will be documented in this section.
   - Containers, inventory policies, and RBAC assignments are defined in Bicep templates
   - `-SkipStorageDeployment` now warns that container/policy consistency is NOT guaranteed when skipped
 - **Inventory schedule**: Changed blob inventory schedule from Weekly to Daily in both Bicep template and PowerShell
+- **Storage SKU default**: Changed default `-StorageAccountSkuName` from `Standard_LRS` to `Standard_ZRS` for zone redundancy
+- Removed default value from Bicep `storageAccountSkuName` parameter (now required to be passed from PowerShell)
 - Removed `Get-SharedStorageAccountName` function (no longer needed)
 
 #### Added

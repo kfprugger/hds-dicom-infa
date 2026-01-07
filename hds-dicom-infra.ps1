@@ -51,7 +51,7 @@
 # -FHIROpsStorageAccountName saimgopswu3 `
 # -stoBicepTemplatePath '.\\infra\\storageAccounts.bicep' `
 # -DeploymentName hds-storage-provisioning `
-# -StorageAccountSkuName Standard_LRS `
+# -StorageAccountSkuName Standard_ZRS `
 # -StorageAccountKind StorageV2 `
 # -FabricWorkspaceId 93acd72f-a23e-4b93-968d-c139600891e7 `
 # -HdsBronzeLakehouse 74f52728-9f52-456f-aeb0-a9e250371087 `
@@ -92,7 +92,7 @@ param(
 
     [string]$DeploymentName = 'hds-storage-provisioning',
 
-    [string]$StorageAccountSkuName = 'Standard_LRS',
+    [string]$StorageAccountSkuName = 'Standard_ZRS',
 
     [string]$StorageAccountKind = 'StorageV2',
 

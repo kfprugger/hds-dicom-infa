@@ -10,7 +10,7 @@ param imageBlobAccountName string
 param imageOperationsAccountName string
 
 @description('SKU to apply to each storage account.')
-param storageAccountSkuName string = 'Standard_LRS'
+param storageAccountSkuName string
 
 @description('Storage account kind applied to both storage accounts.')
 param storageAccountKind string = 'StorageV2'

@@ -2423,10 +2423,12 @@ if (-not $SkipStorageDeployment) {
         storageAccountKind              = $StorageAccountKind
         allowSharedKeyAccess            = $false
         globalTags                      = $GlobalTags
-        assignTrustedWorkspaceIdentity  = $assignTrustedWorkspaceIdentityEffective
-        trustedWorkspacePrincipalId     = if ($assignTrustedWorkspaceIdentityEffective) { $trustedWorkspacePrincipalId } else { '' }
+        # Role assignments are handled separately by PowerShell with idempotent logic
+        # Setting these to false/empty to avoid Bicep "RoleAssignmentExists" errors on re-runs
+        assignTrustedWorkspaceIdentity  = $false
+        trustedWorkspacePrincipalId     = ''
         trustedWorkspacePrincipalType   = $TrustedWorkspacePrincipalType
-        dicomAdminSecurityGroupId       = $DicomAdmSecGrpId
+        dicomAdminSecurityGroupId       = ''
     }
 
     Invoke-StorageDeployment -DeploymentName $DeploymentName -ResourceGroup $ResourceGroupName -TemplatePath $stoBicepTemplatePath -TemplateParameters $templateParameters

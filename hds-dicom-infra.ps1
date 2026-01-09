@@ -452,7 +452,18 @@ function New-MissingRoleAssignment {
 
     if (-not $existingAssignment) {
         Write-Log "Assigning '$RoleDefinitionName' to $Description on scope '$Scope'." 'INFO'
-        New-AzRoleAssignment -Scope $Scope -ObjectId $PrincipalId -RoleDefinitionName $RoleDefinitionName -ObjectType $PrincipalType -ErrorAction Stop | Out-Null
+        try {
+            New-AzRoleAssignment -Scope $Scope -ObjectId $PrincipalId -RoleDefinitionName $RoleDefinitionName -ObjectType $PrincipalType -ErrorAction Stop | Out-Null
+        }
+        catch {
+            # Handle "Conflict" error when role assignment already exists (race condition or propagation delay)
+            if ($_.Exception.Message -match 'Conflict|RoleAssignmentExists|already exists') {
+                Write-Log "'$RoleDefinitionName' already assigned to $Description on scope '$Scope' (detected during creation)." 'DEBUG'
+            }
+            else {
+                throw $_
+            }
+        }
     } else {
         Write-Log "'$RoleDefinitionName' already assigned to $Description on scope '$Scope'." 'DEBUG'
     }

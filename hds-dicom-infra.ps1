@@ -1094,7 +1094,8 @@ function Test-OneLakeDirectoryExists {
 
     $escapedSegments = $PathSegments | ForEach-Object { [Uri]::EscapeDataString($_) }
     $relativePath = ($escapedSegments -join '/')
-    $uri = "{0}/{1}/{2}/Files/{3}?resource=directory" -f $Endpoint.TrimEnd('/'), $WorkspaceSegment, $LakehouseSegment, $relativePath.TrimEnd('/')
+    # HEAD requests don't use ?resource=directory - that's only for PUT (create)
+    $uri = "{0}/{1}/{2}/Files/{3}" -f $Endpoint.TrimEnd('/'), $WorkspaceSegment, $LakehouseSegment, $relativePath.TrimEnd('/')
 
     $headers = @{
         Authorization  = "Bearer $AccessToken"

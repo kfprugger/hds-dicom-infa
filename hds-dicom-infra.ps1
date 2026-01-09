@@ -960,7 +960,7 @@ function New-OneLakeDirectory {
     # https://learn.microsoft.com/fabric/onelake/onelake-api-parity.
     $escapedSegments = $PathSegments | ForEach-Object { [Uri]::EscapeDataString($_) }
     $relativePath = ($escapedSegments -join '/')
-    $uri = "{0}/{1}/{2}/Files/{3}/?resource=directory" -f $Endpoint.TrimEnd('/'), $WorkspaceSegment, $LakehouseSegment, $relativePath.TrimEnd('/')
+    $uri = "{0}/{1}/{2}/Files/{3}?resource=directory" -f $Endpoint.TrimEnd('/'), $WorkspaceSegment, $LakehouseSegment, $relativePath.TrimEnd('/')
 
     Write-Log "Preparing OneLake directory request. Endpoint='$Endpoint', WorkspaceSegment='$WorkspaceSegment', LakehouseSegment='$LakehouseSegment', RelativePath='$relativePath', Uri='$uri'." 'DEBUG'
 
@@ -1094,7 +1094,7 @@ function Test-OneLakeDirectoryExists {
 
     $escapedSegments = $PathSegments | ForEach-Object { [Uri]::EscapeDataString($_) }
     $relativePath = ($escapedSegments -join '/')
-    $uri = "{0}/{1}/{2}/Files/{3}/?resource=directory" -f $Endpoint.TrimEnd('/'), $WorkspaceSegment, $LakehouseSegment, $relativePath.TrimEnd('/')
+    $uri = "{0}/{1}/{2}/Files/{3}?resource=directory" -f $Endpoint.TrimEnd('/'), $WorkspaceSegment, $LakehouseSegment, $relativePath.TrimEnd('/')
 
     $headers = @{
         Authorization  = "Bearer $AccessToken"

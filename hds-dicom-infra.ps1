@@ -108,10 +108,13 @@ param(
 
     [string]$FabricManagementEndpoint = 'https://api.fabric.microsoft.com',
 
-    
+    [Parameter(Mandatory = $true)]
+    [string]$allowSharedKeyAccess = $true, # whether to allow shared key access on storage accounts
 
+    
     [hashtable]$GlobalTags = @{},
 
+    
     [switch]$SkipStorageDeployment, # explain to skip the Bicep deployment of storage accounts and containers
 
     [switch]$SkipFabricFolders, # explain to skip the creation of Fabric folders portion of the script
@@ -2422,11 +2425,11 @@ if (-not $SkipStorageDeployment) {
         imageOperationsAccountName      = $imageOperationsAccountName
         storageAccountSkuName           = $StorageAccountSkuName
         storageAccountKind              = $StorageAccountKind
-        allowSharedKeyAccess            = $false
+        allowSharedKeyAccess            = $true
         globalTags                      = $GlobalTags
         # Role assignments are handled separately by PowerShell with idempotent logic
         # Setting these to false/empty to avoid Bicep "RoleAssignmentExists" errors on re-runs
-        assignTrustedWorkspaceIdentity  = $false
+        assignTrustedWorkspaceIdentity  = $true
         trustedWorkspacePrincipalId     = ''
         trustedWorkspacePrincipalType   = $TrustedWorkspacePrincipalType
         dicomAdminSecurityGroupId       = ''

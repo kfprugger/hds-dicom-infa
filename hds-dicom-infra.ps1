@@ -124,7 +124,7 @@ $TrustedWorkspacePrincipalType = 'ServicePrincipal'
 $FabricApiEndpoint = 'https://onelake.dfs.fabric.microsoft.com'
 
 # Standard Lakehouse FHIR .ndjson Operations path.
-$LakehouseOperationsPath = '/Files/External/Imaging/DICOM/Operations'
+$LakehouseOperationsPath = '/Files/Ingest/Imaging/OPERATIONS/'
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'

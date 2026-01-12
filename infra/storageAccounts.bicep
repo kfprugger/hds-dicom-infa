@@ -16,13 +16,13 @@ param storageAccountSkuName string
 param storageAccountKind string = 'StorageV2'
 
 @description('Determines whether shared key access remains enabled on the storage accounts.')
-param allowSharedKeyAccess bool = false
+param allowSharedKeyAccess bool = true
 
 @description('Tags applied to both storage accounts.')
 param globalTags object = {}
 
 @description('When true, assigns the trusted workspace identity to Storage Blob Data Contributor on each storage account.')
-param assignTrustedWorkspaceIdentity bool = false
+param assignTrustedWorkspaceIdentity bool = true
 
 @description('Principal ID of the trusted workspace identity to assign. Required when assignTrustedWorkspaceIdentity is true.')
 param trustedWorkspacePrincipalId string = ''

@@ -2022,8 +2022,8 @@ function Resolve-ShortcutConflict {
                 break
             } elseif ($key.Key -eq 'Enter') {
                 # User pressed Enter without a choice - use default
-                $choice = 'K'
-                Write-Host "K (default)"
+                $choice = 'R'
+                Write-Host "R (default)"
                 break
             }
         }

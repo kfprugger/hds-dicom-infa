@@ -57,6 +57,8 @@
 # -HdsBronzeLakehouse 74f52728-9f52-456f-aeb0-a9e250371087 `
 # -Debug `
 # -DicomAdmSecGrpId 425d706b-afd7-4044-8110-f5fc4663f5bc `
+# -allowSharedKeyAccess $true `
+# -GlobalTags @{} `
 # -SkipStorageDeployment `
 # -SkipFabricFolders `
 # -SkipFabricShortcuts 

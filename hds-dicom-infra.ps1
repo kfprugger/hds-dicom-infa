@@ -500,9 +500,23 @@ function New-MissingInventoryPolicy {
 
     $existingPolicy = Get-BlobInventoryPolicy -StorageAccountName $StorageAccountName -ResourceGroupName $ResourceGroupName
     $existingRuleNames = @()
-    
-    if ($existingPolicy -and $existingPolicy.Policy -and $existingPolicy.Policy.Rules) {
-        $existingRuleNames = $existingPolicy.Policy.Rules | Select-Object -ExpandProperty Name
+
+    # Safely resolve existing inventory rules across Az.Storage module versions.
+    # Older versions expose rules under .Policy.Rules; newer versions (9.x+) may place
+    # them directly under .Rules or another property structure.
+    $existingRules = $null
+    if ($existingPolicy) {
+        if ($existingPolicy.PSObject.Properties['Policy'] -and
+            $null -ne $existingPolicy.Policy -and
+            $existingPolicy.Policy.PSObject.Properties['Rules']) {
+            $existingRules = $existingPolicy.Policy.Rules
+        } elseif ($existingPolicy.PSObject.Properties['Rules']) {
+            $existingRules = $existingPolicy.Rules
+        }
+    }
+
+    if ($existingRules) {
+        $existingRuleNames = $existingRules | Select-Object -ExpandProperty Name
     }
 
     $inventorySchemaFields = @(
@@ -537,8 +551,8 @@ function New-MissingInventoryPolicy {
     if ($newRules.Count -gt 0) {
         # Combine existing rules with new rules
         $allRules = @()
-        if ($existingPolicy -and $existingPolicy.Policy -and $existingPolicy.Policy.Rules) {
-            foreach ($rule in $existingPolicy.Policy.Rules) {
+        if ($existingRules) {
+            foreach ($rule in $existingRules) {
                 $existingRule = New-AzStorageBlobInventoryPolicyRule -Name $rule.Name `
                     -Destination $rule.Definition.Destination `
                     -Format $rule.Definition.Format `
@@ -2452,6 +2466,19 @@ if (-not $SkipStorageDeployment) {
         Write-Log "Storage deployment skipped by user request. Both storage accounts exist but container/policy consistency is NOT guaranteed." 'WARN'
     }
 }
+
+# Ensure RBAC role assignments, ADLS Gen2 ACLs, containers, and inventory policies are applied
+# This call is idempotent and covers what Bicep cannot do (ADLS ACLs), plus fills the gap where
+# the Bicep template receives empty principal IDs to avoid RoleAssignmentExists errors on re-runs.
+Write-Log 'Validating storage account access: RBAC role assignments, ADLS Gen2 ACLs, containers, and inventory policies...' 'INFO'
+Confirm-ExistingStorageAccounts `
+    -BlobStorageAccountName $imageBlobAccountName `
+    -OperationsStorageAccountName $imageOperationsAccountName `
+    -ResourceGroupName $ResourceGroupName `
+    -StmoDefinitions $stmoDefinitions `
+    -TrustedWorkspacePrincipalId $trustedWorkspacePrincipalId `
+    -TrustedWorkspacePrincipalType $TrustedWorkspacePrincipalType `
+    -DicomAdminSecurityGroupId $DicomAdmSecGrpId
 
 $oneLakeAccessToken = $null
 $fabricApiAccessToken = $null

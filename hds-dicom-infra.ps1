@@ -14,44 +14,18 @@
     December 9, 2025
 
 .EXAMPLE
-    .\hds-dicom-infra.ps1 `
-        -FacilityCsvPath .\example-stmos.csv `
-        -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 `
-        -location westus3 `
-        -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
-        -ResourceGroupName rg-DICOM `
-        -hdsWorkspaceName DICOM-Integration
-
-.EXAMPLE
-    .\hds-dicom-infra.ps1 `
-        -FacilityCsvPath .\example-stmos.csv `
-        -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 `
-        -location westus3 `
-        -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
-        -ResourceGroupName rg-DICOM `
-        -hdsWorkspaceName DICOM-Integration `
-        -ImagesStorageAccountName saimgdcmwu3 `
-        -FHIROpsStorageAccountName saimgopswu3 `
-        -SkipStorageDeployment
-    # Uses specified storage accounts and skips Bicep deployment if accounts already exist
-
-.NOTES
-    Requires Az.Accounts, Az.Resources, and Az.Storage PowerShell modules.
-    More info: https://github.com/kfprugger/hds-dicom-infra
-#>
-
 # .\hds-dicom-infra.ps1 `
-#   -FacilityCsvPath .\example-stmos.csv `
-# -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 
+#  -FacilityCsvPath .\example-stmos.csv `
+# -TenantId 8d038e6a-9b7d-4cb8-bbcf-e84dff156478 `
 # -location westus3 `
-# -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f 
+# -SubscriptionId 9bbee190-dc61-4c58-ab47-1275cb04018f `
 # -ResourceGroupName rg-DICOM `
 # -hdsWorkspaceName DICOM-Integration `
 # -ImagesStorageAccountName saimgdcmwu3 `
 # -FHIROpsStorageAccountName saimgopswu3 `
 # -stoBicepTemplatePath '.\\infra\\storageAccounts.bicep' `
 # -DeploymentName hds-storage-provisioning `
-# -StorageAccountSkuName Standard_ZRS `
+# -StorageAccountSkuName Standard_LRS `
 # -StorageAccountKind StorageV2 `
 # -FabricWorkspaceId 93acd72f-a23e-4b93-968d-c139600891e7 `
 # -HdsBronzeLakehouse 74f52728-9f52-456f-aeb0-a9e250371087 `
@@ -62,6 +36,16 @@
 # -SkipStorageDeployment `
 # -SkipFabricFolders `
 # -SkipFabricShortcuts 
+
+    # Deploys infrastructure using existing storage accounts, skipping Bicep deployment, Fabric folder creation, and shortcut creation.
+
+
+.NOTES
+    Requires Az.Accounts, Az.Resources, and Az.Storage PowerShell modules.
+    More info: https://github.com/kfprugger/hds-dicom-infra
+#>
+
+
 
 #requires -Modules Az.Accounts, Az.Resources, Az.Storage
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -1150,29 +1134,51 @@ function New-FabricInventoryFolders {
     $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
     $endpointRoot = $Endpoint.TrimEnd('/')
 
-    # Base path for DICOM HDS shortcuts: /Files/Inventory/Imaging/DICOM/DICOM-HDS
-    $dicomHdsPath = @('Inventory', 'Imaging', 'DICOM', 'DICOM-HDS')
-    $dicomHdsRelative = ($dicomHdsPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
-    $dicomHdsUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $dicomHdsRelative
+    # Base path: /Files/Inventory/Imaging/DICOM
+    $dicomBasePath = @('Inventory', 'Imaging', 'DICOM')
+    $dicomBaseRelative = ($dicomBasePath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+    $dicomBaseUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $dicomBaseRelative
 
-    # Create /Files/Inventory/Imaging/DICOM/DICOM-HDS if it doesn't exist
-    if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $dicomHdsPath -AccessToken $AccessToken) {
-        Write-Log "DICOM-HDS base folder already exists: $dicomHdsUri" 'INFO'
+    # Ensure /Files/Inventory/Imaging/DICOM exists
+    if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $dicomBasePath -AccessToken $AccessToken) {
+        Write-Log "DICOM base folder already exists: $dicomBaseUri" 'INFO'
     } else {
-        Write-Log "Creating DICOM-HDS base folder: $dicomHdsUri" 'INFO'
-        New-LakehouseDirectoryPath -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $dicomHdsPath -AccessToken $AccessToken
+        Write-Log "Creating DICOM base folder: $dicomBaseUri" 'INFO'
+        New-LakehouseDirectoryPath -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $dicomBasePath -AccessToken $AccessToken
     }
 
-    # Create InventoryFiles subfolder under DICOM-HDS (shared for all STMO inventory shortcuts)
-    $inventoryFilesPath = $dicomHdsPath + @('InventoryFiles')
-    $inventoryFilesRelative = ($inventoryFilesPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
-    $inventoryFilesUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $inventoryFilesRelative
+    # Create per-STMO namespace folders: /Files/Inventory/Imaging/DICOM/{stmo}/
+    # and InventoryFiles subfolder: /Files/Inventory/Imaging/DICOM/{stmo}/InventoryFiles/
+    foreach ($definition in $StmoDefinitions) {
+        $containerName = [string]$definition.ContainerName
+        if ([string]::IsNullOrWhiteSpace($containerName)) {
+            Write-Log 'Skipping STMO definition without a container name during folder creation.' 'WARN'
+            continue
+        }
 
-    if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesPath -AccessToken $AccessToken) {
-        Write-Log "InventoryFiles folder already exists: $inventoryFilesUri" 'INFO'
-    } else {
-        Write-Log "Creating InventoryFiles folder: $inventoryFilesUri" 'INFO'
-        New-OneLakeDirectory -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesPath -AccessToken $AccessToken
+        # Namespace folder: /Files/Inventory/Imaging/DICOM/{stmo}
+        $stmoPath = $dicomBasePath + @($containerName)
+        $stmoRelative = ($stmoPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+        $stmoUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $stmoRelative
+
+        if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $stmoPath -AccessToken $AccessToken) {
+            Write-Log "STMO namespace folder already exists: $stmoUri" 'INFO'
+        } else {
+            Write-Log "Creating STMO namespace folder: $stmoUri" 'INFO'
+            New-OneLakeDirectory -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $stmoPath -AccessToken $AccessToken
+        }
+
+        # InventoryFiles subfolder: /Files/Inventory/Imaging/DICOM/{stmo}/InventoryFiles
+        $inventoryFilesPath = $stmoPath + @('InventoryFiles')
+        $inventoryFilesRelative = ($inventoryFilesPath | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/'
+        $inventoryFilesUri = "{0}/{1}/{2}/Files/{3}" -f $endpointRoot, $segments.Workspace, $segments.Lakehouse, $inventoryFilesRelative
+
+        if (Test-OneLakeDirectoryExists -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesPath -AccessToken $AccessToken) {
+            Write-Log "InventoryFiles folder already exists: $inventoryFilesUri" 'INFO'
+        } else {
+            Write-Log "Creating InventoryFiles folder: $inventoryFilesUri" 'INFO'
+            New-OneLakeDirectory -Endpoint $Endpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesPath -AccessToken $AccessToken
+        }
     }
 }
 
@@ -2105,16 +2111,6 @@ function New-FabricImageShortcuts {
         return
     }
 
-    $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
-
-    # New layout: /Files/Inventory/Imaging/DICOM/DICOM-HDS for STMO shortcuts
-    $basePath = '/Files/Inventory/Imaging/DICOM/DICOM-HDS'
-    $baseSegments = Get-LakehousePathSegments -FullPath $basePath
-
-    # InventoryFiles subfolder for inventory shortcuts
-    $inventoryFilesPath = '/Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles'
-    $inventoryFilesSegments = Get-LakehousePathSegments -FullPath $inventoryFilesPath
-
     $blobEndpoint = "https://$BlobStorageAccountName.blob.core.windows.net"
     $defaultContainer = $StmoDefinitions | Select-Object -First 1
     $defaultContainerName = if ($defaultContainer -and $defaultContainer.PSObject.Properties['ContainerName']) { [string]$defaultContainer.ContainerName } else { $null }
@@ -2147,6 +2143,9 @@ function New-FabricImageShortcuts {
         throw "Unable to resolve a Fabric connection ID for '$BlobConnectionDisplayName'."
     }
 
+    # Resolve lakehouse segments once for folder verification
+    $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
+
     foreach ($definition in $StmoDefinitions) {
         $containerName = [string]$definition.ContainerName
         if ([string]::IsNullOrWhiteSpace($containerName)) {
@@ -2154,8 +2153,22 @@ function New-FabricImageShortcuts {
             continue
         }
 
-        # Create STMO image shortcut directly at /Files/Inventory/Imaging/DICOM/DICOM-HDS/{containerName}
-        $shortcutPath = "Files/Inventory/Imaging/DICOM/DICOM-HDS"
+        # Idempotency: ensure per-STMO namespace folder and InventoryFiles subfolder exist
+        # before creating shortcuts, regardless of whether -SkipFabricFolders was used.
+        $stmoFolderSegments = @('Inventory', 'Imaging', 'DICOM', $containerName)
+        if (-not (Test-OneLakeDirectoryExists -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $stmoFolderSegments -AccessToken $OneLakeAccessToken)) {
+            Write-Log "Creating missing STMO namespace folder for '$containerName'." 'INFO'
+            New-LakehouseDirectoryPath -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $stmoFolderSegments -AccessToken $OneLakeAccessToken
+        }
+
+        $inventoryFilesFolderSegments = $stmoFolderSegments + @('InventoryFiles')
+        if (-not (Test-OneLakeDirectoryExists -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesFolderSegments -AccessToken $OneLakeAccessToken)) {
+            Write-Log "Creating missing InventoryFiles folder for '$containerName'." 'INFO'
+            New-OneLakeDirectory -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesFolderSegments -AccessToken $OneLakeAccessToken
+        }
+
+        # Create STMO image shortcut at /Files/Inventory/Imaging/DICOM/{containerName}/{containerName}
+        $shortcutPath = "Files/Inventory/Imaging/DICOM/$containerName"
         $existingShortcut = Get-FabricShortcutByName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $containerName -ShortcutPath $shortcutPath
 
         if ($existingShortcut) {
@@ -2202,11 +2215,11 @@ function New-FabricImageShortcuts {
             }
         }
 
-        # Create inventory shortcut at /Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles/{containerName}-inventory
+        # Create inventory shortcut at /Files/Inventory/Imaging/DICOM/{containerName}/InventoryFiles/{containerName}-inventory
         # Inventory containers (-inv) are on the same blob storage account as the STMO image containers
         $inventoryContainerName = "$containerName-inv"
         $inventoryShortcutName = "$containerName-inventory"
-        $inventoryShortcutPath = "Files/Inventory/Imaging/DICOM/DICOM-HDS/InventoryFiles"
+        $inventoryShortcutPath = "Files/Inventory/Imaging/DICOM/$containerName/InventoryFiles"
 
         $existingInventoryShortcut = Get-FabricShortcutByName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId -ShortcutName $inventoryShortcutName -ShortcutPath $inventoryShortcutPath
 

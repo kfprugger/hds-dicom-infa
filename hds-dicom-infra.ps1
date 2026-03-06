@@ -2156,15 +2156,24 @@ function New-FabricImageShortcuts {
         # Idempotency: ensure per-STMO namespace folder and InventoryFiles subfolder exist
         # before creating shortcuts, regardless of whether -SkipFabricFolders was used.
         $stmoFolderSegments = @('Inventory', 'Imaging', 'DICOM', $containerName)
+        $foldersCreated = $false
         if (-not (Test-OneLakeDirectoryExists -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $stmoFolderSegments -AccessToken $OneLakeAccessToken)) {
             Write-Log "Creating missing STMO namespace folder for '$containerName'." 'INFO'
             New-LakehouseDirectoryPath -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $stmoFolderSegments -AccessToken $OneLakeAccessToken
+            $foldersCreated = $true
         }
 
         $inventoryFilesFolderSegments = $stmoFolderSegments + @('InventoryFiles')
         if (-not (Test-OneLakeDirectoryExists -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesFolderSegments -AccessToken $OneLakeAccessToken)) {
             Write-Log "Creating missing InventoryFiles folder for '$containerName'." 'INFO'
             New-OneLakeDirectory -Endpoint $OneLakeEndpoint -WorkspaceSegment $segments.Workspace -LakehouseSegment $segments.Lakehouse -PathSegments $inventoryFilesFolderSegments -AccessToken $OneLakeAccessToken
+            $foldersCreated = $true
+        }
+
+        # Allow time for folder creation and access propagation before creating shortcuts
+        if ($foldersCreated) {
+            Write-Log "Waiting 5 seconds for folder and access propagation before creating shortcuts for '$containerName'..." 'INFO'
+            Start-Sleep -Seconds 5
         }
 
         # Create STMO image shortcut at /Files/Inventory/Imaging/DICOM/{containerName}/{containerName}
@@ -2527,3 +2536,12 @@ if (-not $SkipFabricShortcuts) {
 }
 
 Write-Log 'HDS DICOM infrastructure orchestration completed.' 'INFO'
+
+Write-Host ''
+Write-Host '========================================' -ForegroundColor Green
+Write-Host '  DEPLOYMENT COMPLETE                   ' -ForegroundColor Green
+Write-Host '========================================' -ForegroundColor Green
+Write-Host "  HDS DICOM infrastructure orchestration" -ForegroundColor White
+Write-Host "  finished successfully."                 -ForegroundColor White
+Write-Host '========================================' -ForegroundColor Green
+Write-Host ''

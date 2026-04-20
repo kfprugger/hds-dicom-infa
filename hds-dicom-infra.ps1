@@ -537,13 +537,31 @@ function New-MissingInventoryPolicy {
         $allRules = @()
         if ($existingRules) {
             foreach ($rule in $existingRules) {
+                # Az.Storage 6.x+ moved Destination from $rule.Definition.Destination to $rule.Destination
+                $ruleDestination = $null
+                if ($rule.PSObject.Properties['Destination']) {
+                    $ruleDestination = $rule.Destination
+                } elseif ($rule.Definition -and $rule.Definition.PSObject.Properties['Destination']) {
+                    $ruleDestination = $rule.Definition.Destination
+                }
+                if (-not $ruleDestination) {
+                    Write-Log "Skipping existing inventory rule '$($rule.Name)' — unable to resolve Destination property." 'WARN'
+                    continue
+                }
+
+                $ruleFormat = if ($rule.Definition -and $rule.Definition.PSObject.Properties['Format']) { $rule.Definition.Format } else { 'Parquet' }
+                $ruleSchedule = if ($rule.Definition -and $rule.Definition.PSObject.Properties['Schedule']) { $rule.Definition.Schedule } else { 'Daily' }
+                $ruleBlobTypes = if ($rule.Definition -and $rule.Definition.PSObject.Properties['Filters'] -and $rule.Definition.Filters.PSObject.Properties['BlobTypes']) { $rule.Definition.Filters.BlobTypes } else { @('blockBlob') }
+                $rulePrefixMatch = if ($rule.Definition -and $rule.Definition.PSObject.Properties['Filters'] -and $rule.Definition.Filters.PSObject.Properties['PrefixMatch']) { $rule.Definition.Filters.PrefixMatch } else { @() }
+                $ruleSchemaFields = if ($rule.Definition -and $rule.Definition.PSObject.Properties['SchemaFields']) { $rule.Definition.SchemaFields } else { @('Name') }
+
                 $existingRule = New-AzStorageBlobInventoryPolicyRule -Name $rule.Name `
-                    -Destination $rule.Definition.Destination `
-                    -Format $rule.Definition.Format `
-                    -Schedule $rule.Definition.Schedule `
-                    -BlobType $rule.Definition.Filters.BlobTypes `
-                    -PrefixMatch $rule.Definition.Filters.PrefixMatch `
-                    -BlobSchemaField $rule.Definition.SchemaFields
+                    -Destination $ruleDestination `
+                    -Format $ruleFormat `
+                    -Schedule $ruleSchedule `
+                    -BlobType $ruleBlobTypes `
+                    -PrefixMatch $rulePrefixMatch `
+                    -BlobSchemaField $ruleSchemaFields
                 $allRules += $existingRule
             }
         }

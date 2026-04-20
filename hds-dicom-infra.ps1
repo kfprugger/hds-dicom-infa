@@ -1572,7 +1572,7 @@ function Write-FabricConnectionDiagnostics {
 
     $connection = Get-FabricConnectionById -Endpoint $Endpoint -AccessToken $AccessToken -ConnectionId $ConnectionId
     if (-not $connection) {
-        Write-Log "$ContextLabel: unable to resolve Fabric connection details for connection ID '$ConnectionId'." 'WARN'
+        Write-Log "${ContextLabel}: unable to resolve Fabric connection details for connection ID '$ConnectionId'." 'WARN'
         return
     }
 
@@ -1609,12 +1609,12 @@ function Write-FabricConnectionDiagnostics {
         }
     }
 
-    Write-Log "$ContextLabel: Fabric connection diagnostics -> id='$ConnectionId', displayName='$displayName', connectivityType='$connectivityType', detailType='$detailType', detailPath='$detailPath', workspaceId='$workspaceId', credentialType='$credentialType', singleSignOnType='$singleSignOnType', connectionEncryption='$connectionEncryption', skipTestConnection='$skipTestConnection'." 'INFO'
+    Write-Log "${ContextLabel}: Fabric connection diagnostics -> id='$ConnectionId', displayName='$displayName', connectivityType='$connectivityType', detailType='$detailType', detailPath='$detailPath', workspaceId='$workspaceId', credentialType='$credentialType', singleSignOnType='$singleSignOnType', connectionEncryption='$connectionEncryption', skipTestConnection='$skipTestConnection'." 'INFO'
 
     try {
-        Write-Log "$ContextLabel: full Fabric connection object -> $(($connection | ConvertTo-Json -Depth 8 -Compress))" 'DEBUG'
+        Write-Log "${ContextLabel}: full Fabric connection object -> $(($connection | ConvertTo-Json -Depth 8 -Compress))" 'DEBUG'
     } catch {
-        Write-Log "$ContextLabel: failed to serialize full Fabric connection object: $($_.Exception.Message)" 'DEBUG'
+        Write-Log "${ContextLabel}: failed to serialize full Fabric connection object: $($_.Exception.Message)" 'DEBUG'
     }
 }
 

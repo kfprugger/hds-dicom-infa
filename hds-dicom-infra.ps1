@@ -1957,9 +1957,9 @@ function New-FabricBlobConnection {
     $desiredPathAliases = @(
         $accountUrl,
         $accountHost,
-        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { "$accountUrl/$DefaultContainerName" },
-        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { "$accountHost/$DefaultContainerName" },
-        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { $DefaultContainerName }
+        $(if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { "$accountUrl/$DefaultContainerName" }),
+        $(if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { "$accountHost/$DefaultContainerName" }),
+        $(if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { $DefaultContainerName })
     ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 
     Write-Log "Ensuring blob connection uses type '$connectionType' and method '$creationMethodName'." 'DEBUG'

@@ -1232,6 +1232,242 @@ function Get-FabricApiHeaders {
     }
 }
 
+function Get-NormalizedFabricConnectionValue {
+    param([AllowNull()][AllowEmptyString()][object]$Value)
+
+    if ($null -eq $Value) {
+        return ''
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return ''
+    }
+
+    $normalized = $text.Trim()
+    $normalized = $normalized -replace '\\', '/'
+    $normalized = $normalized -replace '^[a-zA-Z][a-zA-Z0-9+.-]*://', ''
+    $normalized = $normalized.Trim('/')
+    return $normalized.ToLowerInvariant()
+}
+
+function Remove-FabricConnectionById {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$AccessToken,
+        [Parameter(Mandatory = $true)][string]$ConnectionId,
+        [Parameter(Mandatory = $true)][string]$DisplayName
+    )
+
+    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
+    $connectionIdEncoded = [Uri]::EscapeDataString($ConnectionId)
+    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections/$connectionIdEncoded"
+
+    try {
+        Invoke-FabricApiRequest -Method 'Delete' -Uri $uri -Headers $headers -Description "Delete Fabric connection '$DisplayName'"
+        Write-Log "Deleted Fabric connection '$DisplayName' (ID: $ConnectionId)." 'INFO'
+    } catch {
+        $message = $_.Exception.Message
+        if ($message -match '404|EntityNotFound') {
+            Write-Log "Fabric connection '$DisplayName' (ID: $ConnectionId) was already deleted." 'WARN'
+            return
+        }
+
+        Write-Log "Failed to delete Fabric connection '$DisplayName' (ID: $ConnectionId): $message" 'ERROR'
+        throw
+    }
+}
+
+function Get-FabricConnectionDriftReasons {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$ExistingConnection,
+        [Parameter(Mandatory = $true)][hashtable]$DesiredBody,
+        [string[]]$DesiredPathAliases = @()
+    )
+
+    $reasons = @()
+
+    $existingDisplayName = if ($ExistingConnection.PSObject.Properties['displayName']) { [string]$ExistingConnection.displayName } else { '' }
+    $desiredDisplayName = [string]$DesiredBody.displayName
+    if ($existingDisplayName -ne $desiredDisplayName) {
+        $reasons += "displayName: existing '$existingDisplayName', desired '$desiredDisplayName'"
+    }
+
+    $existingConnectivityType = if ($ExistingConnection.PSObject.Properties['connectivityType']) { [string]$ExistingConnection.connectivityType } else { '' }
+    $desiredConnectivityType = [string]$DesiredBody.connectivityType
+    if ($existingConnectivityType -ne $desiredConnectivityType) {
+        $reasons += "connectivityType: existing '$existingConnectivityType', desired '$desiredConnectivityType'"
+    }
+
+    $existingPrivacyLevel = if ($ExistingConnection.PSObject.Properties['privacyLevel']) { [string]$ExistingConnection.privacyLevel } else { '' }
+    $desiredPrivacyLevel = if ($DesiredBody.ContainsKey('privacyLevel')) { [string]$DesiredBody.privacyLevel } else { 'Organizational' }
+    if ($existingPrivacyLevel -ne $desiredPrivacyLevel) {
+        $reasons += "privacyLevel: existing '$existingPrivacyLevel', desired '$desiredPrivacyLevel'"
+    }
+
+    $existingConnectionType = ''
+    $existingPath = ''
+    if ($ExistingConnection.PSObject.Properties['connectionDetails'] -and $null -ne $ExistingConnection.connectionDetails) {
+        if ($ExistingConnection.connectionDetails.PSObject.Properties['type']) {
+            $existingConnectionType = [string]$ExistingConnection.connectionDetails.type
+        }
+        if ($ExistingConnection.connectionDetails.PSObject.Properties['path']) {
+            $existingPath = [string]$ExistingConnection.connectionDetails.path
+        }
+    }
+
+    $desiredConnectionType = ''
+    if ($DesiredBody.ContainsKey('connectionDetails') -and $null -ne $DesiredBody.connectionDetails -and $DesiredBody.connectionDetails.ContainsKey('type')) {
+        $desiredConnectionType = [string]$DesiredBody.connectionDetails.type
+    }
+    if ($existingConnectionType -ne $desiredConnectionType) {
+        $reasons += "connection type: existing '$existingConnectionType', desired '$desiredConnectionType'"
+    }
+
+    if ($DesiredPathAliases.Count -gt 0) {
+        $normalizedExistingPath = Get-NormalizedFabricConnectionValue -Value $existingPath
+        $normalizedDesiredPaths = @($DesiredPathAliases | ForEach-Object { Get-NormalizedFabricConnectionValue -Value $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+        if ([string]::IsNullOrWhiteSpace($normalizedExistingPath)) {
+            $reasons += 'connection path: existing connection did not expose a path value'
+        } elseif ($normalizedDesiredPaths -notcontains $normalizedExistingPath) {
+            $reasons += "connection path: existing '$existingPath', desired one of '$($DesiredPathAliases -join ''', ''')'"
+        }
+    }
+
+    $existingCredentialType = ''
+    $existingSingleSignOnType = ''
+    $existingConnectionEncryption = ''
+    $existingSkipTestConnection = $null
+    if ($ExistingConnection.PSObject.Properties['credentialDetails'] -and $null -ne $ExistingConnection.credentialDetails) {
+        if ($ExistingConnection.credentialDetails.PSObject.Properties['credentialType']) {
+            $existingCredentialType = [string]$ExistingConnection.credentialDetails.credentialType
+        }
+        if ($ExistingConnection.credentialDetails.PSObject.Properties['singleSignOnType']) {
+            $existingSingleSignOnType = [string]$ExistingConnection.credentialDetails.singleSignOnType
+        }
+        if ($ExistingConnection.credentialDetails.PSObject.Properties['connectionEncryption']) {
+            $existingConnectionEncryption = [string]$ExistingConnection.credentialDetails.connectionEncryption
+        }
+        if ($ExistingConnection.credentialDetails.PSObject.Properties['skipTestConnection']) {
+            $existingSkipTestConnection = [bool]$ExistingConnection.credentialDetails.skipTestConnection
+        }
+    }
+
+    $desiredCredentialType = ''
+    $desiredSingleSignOnType = ''
+    $desiredConnectionEncryption = ''
+    $desiredSkipTestConnection = $null
+    if ($DesiredBody.ContainsKey('credentialDetails') -and $null -ne $DesiredBody.credentialDetails) {
+        if ($DesiredBody.credentialDetails.ContainsKey('credentials') -and $null -ne $DesiredBody.credentialDetails.credentials -and $DesiredBody.credentialDetails.credentials.ContainsKey('credentialType')) {
+            $desiredCredentialType = [string]$DesiredBody.credentialDetails.credentials.credentialType
+        }
+        if ($DesiredBody.credentialDetails.ContainsKey('singleSignOnType')) {
+            $desiredSingleSignOnType = [string]$DesiredBody.credentialDetails.singleSignOnType
+        }
+        if ($DesiredBody.credentialDetails.ContainsKey('connectionEncryption')) {
+            $desiredConnectionEncryption = [string]$DesiredBody.credentialDetails.connectionEncryption
+        }
+        if ($DesiredBody.credentialDetails.ContainsKey('skipTestConnection')) {
+            $desiredSkipTestConnection = [bool]$DesiredBody.credentialDetails.skipTestConnection
+        }
+    }
+
+    if ($existingCredentialType -ne $desiredCredentialType) {
+        $reasons += "credentialType: existing '$existingCredentialType', desired '$desiredCredentialType'"
+    }
+    if ($existingSingleSignOnType -ne $desiredSingleSignOnType) {
+        $reasons += "singleSignOnType: existing '$existingSingleSignOnType', desired '$desiredSingleSignOnType'"
+    }
+    if ($existingConnectionEncryption -ne $desiredConnectionEncryption) {
+        $reasons += "connectionEncryption: existing '$existingConnectionEncryption', desired '$desiredConnectionEncryption'"
+    }
+    if ($null -ne $desiredSkipTestConnection -and $existingSkipTestConnection -ne $desiredSkipTestConnection) {
+        $reasons += "skipTestConnection: existing '$existingSkipTestConnection', desired '$desiredSkipTestConnection'"
+    }
+
+    return $reasons
+}
+
+function Ensure-FabricConnection {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$WorkspaceId,
+        [Parameter(Mandatory = $true)][string]$AccessToken,
+        [Parameter(Mandatory = $true)][string]$DisplayName,
+        [Parameter(Mandatory = $true)][hashtable]$DesiredBody,
+        [string[]]$DesiredPathAliases = @()
+    )
+
+    $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
+    if (-not $existing) {
+        $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
+        if ($existing) {
+            Write-Log "Found tenant-scoped Fabric connection '$DisplayName'." 'INFO'
+        }
+    }
+
+    if ($existing -and $existing.PSObject.Properties['id']) {
+        $driftReasons = Get-FabricConnectionDriftReasons -ExistingConnection $existing -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases
+        if ($driftReasons.Count -eq 0) {
+            $existingId = [string]$existing.id
+            Write-Log "Existing Fabric connection '$DisplayName' already matches the script-generated values. Reusing connection ID '$existingId'." 'INFO'
+            return $existingId
+        }
+
+        Write-Log "Fabric connection '$DisplayName' differs from the script-generated values: $($driftReasons -join '; '). Replacing connection." 'WARN'
+        Remove-FabricConnectionById -Endpoint $Endpoint -AccessToken $AccessToken -ConnectionId ([string]$existing.id) -DisplayName $DisplayName
+        Write-Log "Waiting 5 seconds for Fabric connection deletion to propagate before recreation." 'INFO'
+        Start-Sleep -Seconds 5
+    }
+
+    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
+    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $result = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $DesiredBody -Description "Create Fabric connection '$DisplayName'"
+            $response = $result.Response
+            if ($response -and $response.PSObject.Properties['id']) {
+                $connectionId = [string]$response.id
+                Write-Log "Created Fabric connection '$DisplayName' (ID: $connectionId)." 'INFO'
+                return $connectionId
+            }
+
+            throw "Fabric connection response did not include an identifier for '$DisplayName'."
+        } catch {
+            $message = $_.Exception.Message
+            if ($attempt -eq 1 -and $message -match '409|DuplicateConnectionName') {
+                Write-Log "Create for Fabric connection '$DisplayName' returned a duplicate-name conflict. Rechecking the existing connection before retrying." 'WARN'
+                $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
+                if (-not $existingRetry) {
+                    $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
+                }
+
+                if ($existingRetry -and $existingRetry.PSObject.Properties['id']) {
+                    $driftReasons = Get-FabricConnectionDriftReasons -ExistingConnection $existingRetry -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases
+                    if ($driftReasons.Count -eq 0) {
+                        $existingRetryId = [string]$existingRetry.id
+                        Write-Log "Fabric connection '$DisplayName' now matches the script-generated values after conflict resolution. Reusing connection ID '$existingRetryId'." 'INFO'
+                        return $existingRetryId
+                    }
+
+                    Write-Log "Fabric connection '$DisplayName' still differs after duplicate-name conflict: $($driftReasons -join '; '). Deleting and retrying create once." 'WARN'
+                    Remove-FabricConnectionById -Endpoint $Endpoint -AccessToken $AccessToken -ConnectionId ([string]$existingRetry.id) -DisplayName $DisplayName
+                    Write-Log "Waiting 5 seconds for Fabric connection deletion to propagate before retrying creation." 'INFO'
+                    Start-Sleep -Seconds 5
+                    continue
+                }
+            }
+
+            Write-Log "Failed to create Fabric connection '$DisplayName': $message" 'ERROR'
+            throw
+        }
+    }
+
+    throw "Unable to create Fabric connection '$DisplayName'."
+}
+
 function Get-FabricConnectionByDisplayName {
     param(
         [Parameter(Mandatory = $true)][string]$Endpoint,
@@ -1292,6 +1528,112 @@ function Get-FabricConnectionByDisplayName {
     }
 
     return $null
+}
+
+function Get-FabricConnectionById {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$AccessToken,
+        [Parameter(Mandatory = $true)][string]$ConnectionId
+    )
+
+    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
+    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
+
+    try {
+        $result = Invoke-FabricApiRequest -Method 'Get' -Uri $uri -Headers $headers -Description 'List Fabric connections for connection ID lookup'
+    } catch {
+        Write-Log "Unable to retrieve Fabric connections for connection ID lookup: $($_.Exception.Message)" 'WARN'
+        return $null
+    }
+
+    $response = $result.Response
+    $items = @()
+    if ($null -ne $response) {
+        if ($response.PSObject.Properties['value']) {
+            $items = @($response.value)
+        } elseif ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
+            $items = @($response)
+        } else {
+            $items = @($response)
+        }
+    }
+
+    return ($items | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq $ConnectionId } | Select-Object -First 1)
+}
+
+function Write-FabricConnectionDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$AccessToken,
+        [Parameter(Mandatory = $true)][string]$ConnectionId,
+        [Parameter(Mandatory = $true)][string]$ContextLabel
+    )
+
+    $connection = Get-FabricConnectionById -Endpoint $Endpoint -AccessToken $AccessToken -ConnectionId $ConnectionId
+    if (-not $connection) {
+        Write-Log "$ContextLabel: unable to resolve Fabric connection details for connection ID '$ConnectionId'." 'WARN'
+        return
+    }
+
+    $displayName = if ($connection.PSObject.Properties['displayName']) { [string]$connection.displayName } else { '<unknown>' }
+    $connectivityType = if ($connection.PSObject.Properties['connectivityType']) { [string]$connection.connectivityType } else { '<unknown>' }
+    $workspaceId = if ($connection.PSObject.Properties['workspaceId']) { [string]$connection.workspaceId } else { '<tenant-or-unreported>' }
+    $detailType = '<unknown>'
+    $detailPath = '<unknown>'
+    if ($connection.PSObject.Properties['connectionDetails'] -and $null -ne $connection.connectionDetails) {
+        if ($connection.connectionDetails.PSObject.Properties['type']) {
+            $detailType = [string]$connection.connectionDetails.type
+        }
+        if ($connection.connectionDetails.PSObject.Properties['path']) {
+            $detailPath = [string]$connection.connectionDetails.path
+        }
+    }
+
+    $credentialType = '<unknown>'
+    $singleSignOnType = '<unknown>'
+    $connectionEncryption = '<unknown>'
+    $skipTestConnection = '<unknown>'
+    if ($connection.PSObject.Properties['credentialDetails'] -and $null -ne $connection.credentialDetails) {
+        if ($connection.credentialDetails.PSObject.Properties['credentialType']) {
+            $credentialType = [string]$connection.credentialDetails.credentialType
+        }
+        if ($connection.credentialDetails.PSObject.Properties['singleSignOnType']) {
+            $singleSignOnType = [string]$connection.credentialDetails.singleSignOnType
+        }
+        if ($connection.credentialDetails.PSObject.Properties['connectionEncryption']) {
+            $connectionEncryption = [string]$connection.credentialDetails.connectionEncryption
+        }
+        if ($connection.credentialDetails.PSObject.Properties['skipTestConnection']) {
+            $skipTestConnection = [string]([bool]$connection.credentialDetails.skipTestConnection)
+        }
+    }
+
+    Write-Log "$ContextLabel: Fabric connection diagnostics -> id='$ConnectionId', displayName='$displayName', connectivityType='$connectivityType', detailType='$detailType', detailPath='$detailPath', workspaceId='$workspaceId', credentialType='$credentialType', singleSignOnType='$singleSignOnType', connectionEncryption='$connectionEncryption', skipTestConnection='$skipTestConnection'." 'INFO'
+
+    try {
+        Write-Log "$ContextLabel: full Fabric connection object -> $(($connection | ConvertTo-Json -Depth 8 -Compress))" 'DEBUG'
+    } catch {
+        Write-Log "$ContextLabel: failed to serialize full Fabric connection object: $($_.Exception.Message)" 'DEBUG'
+    }
+}
+
+function Write-FabricShortcutDiagnostics {
+    param(
+        [Parameter(Mandatory = $true)][string]$ShortcutName,
+        [Parameter(Mandatory = $true)][string]$ShortcutPath,
+        [Parameter(Mandatory = $true)][string]$TargetType,
+        [Parameter(Mandatory = $true)][string]$Location,
+        [Parameter(Mandatory = $true)][string]$Subpath,
+        [Parameter(Mandatory = $true)][string]$ConnectionId,
+        [string]$ConnectionDisplayName
+    )
+
+    $displayNameText = if ([string]::IsNullOrWhiteSpace($ConnectionDisplayName)) { '<unspecified>' } else { $ConnectionDisplayName }
+    $subpathSegments = @($Subpath.Trim('/').Split('/', [System.StringSplitOptions]::RemoveEmptyEntries))
+    $segmentCount = $subpathSegments.Count
+
+    Write-Log "Preparing Fabric shortcut '$ShortcutName' at '$ShortcutPath' using targetType '$TargetType', location '$Location', subpath '$Subpath', connectionId '$ConnectionId', connectionDisplayName '$displayNameText', subpathSegmentCount '$segmentCount'." 'INFO'
 }
 
 function Get-FabricAdlsConnectionMetadata {
@@ -1423,19 +1765,6 @@ function New-FabricBlobConnection {
         [Parameter(Mandatory = $true)][string]$StorageLocation,
         [string]$DefaultContainerName
     )
-
-    $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
-    if (-not $existing) {
-        $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
-        if ($existing) {
-            Write-Log "Found tenant-scoped Fabric connection '$DisplayName'; reusing it." 'INFO'
-        }
-    }
-    if ($existing -and $existing.PSObject.Properties['id']) {
-        $existingId = [string]$existing.id
-        Write-Log "Reusing Fabric connection '$DisplayName' (ID: $existingId)." 'INFO'
-        return $existingId
-    }
 
     $metadata = Get-FabricBlobConnectionMetadata -Endpoint $Endpoint -AccessToken $AccessToken
 
@@ -1625,27 +1954,16 @@ function New-FabricBlobConnection {
         credentialDetails = $credentialDetails
     }
 
-    Write-Log "Creating blob connection using type '$connectionType' and method '$creationMethodName'." 'DEBUG'
+    $desiredPathAliases = @(
+        $accountUrl,
+        $accountHost,
+        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { "$accountUrl/$DefaultContainerName" },
+        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { "$accountHost/$DefaultContainerName" },
+        if (-not [string]::IsNullOrWhiteSpace($DefaultContainerName)) { $DefaultContainerName }
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 
-    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
-    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
-
-    try {
-        $result = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create blob storage connection '$DisplayName'"
-    } catch {
-        $message = $_.Exception.Message
-        Write-Log "Failed to create Fabric connection '$DisplayName': $message" 'ERROR'
-        throw
-    }
-
-    $response = $result.Response
-    if ($response -and $response.PSObject.Properties['id']) {
-        $connectionId = [string]$response.id
-        Write-Log "Created Fabric connection '$DisplayName' (ID: $connectionId)." 'INFO'
-        return $connectionId
-    }
-
-    throw "Fabric connection response did not include an identifier for '$DisplayName'."
+    Write-Log "Ensuring blob connection uses type '$connectionType' and method '$creationMethodName'." 'DEBUG'
+    return (Ensure-FabricConnection -Endpoint $Endpoint -WorkspaceId $WorkspaceId -AccessToken $AccessToken -DisplayName $DisplayName -DesiredBody $body -DesiredPathAliases $desiredPathAliases)
 }
 
 function New-FabricAdlsConnection {
@@ -1657,20 +1975,6 @@ function New-FabricAdlsConnection {
         [Parameter(Mandatory = $true)][string]$StorageLocation,
         [Parameter(Mandatory = $true)][string]$ContainerSubpath
     )
-
-    $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
-    if (-not $existing) {
-        # Also check for tenant-scoped connections
-        $existing = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
-        if ($existing) {
-            Write-Log "Found tenant-scoped Fabric ADLS connection '$DisplayName'; reusing it." 'INFO'
-        }
-    }
-    if ($existing -and $existing.PSObject.Properties['id']) {
-        $existingId = [string]$existing.id
-        Write-Log "Reusing Fabric ADLS connection '$DisplayName' (ID: $existingId)." 'INFO'
-        return $existingId
-    }
 
     $metadata = Get-FabricAdlsConnectionMetadata -Endpoint $Endpoint -AccessToken $AccessToken
 
@@ -1764,10 +2068,6 @@ function New-FabricAdlsConnection {
                     $paramName = [string]$parameter.name
                     $compactName = ($paramName -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
                     $value = $null
-                    
-                    Write-Host "Full relative Path" $fullPathRelative
-                    Write-Host "Path with leading slash" $pathWithLeadingSlash
-                    Write-Host "Full absolute path" $fullPathAbsolute
 
                     if ($compactName -match 'pathuri|pathurl|urlpath') {
                         $value = $fullPathAbsolute
@@ -1887,42 +2187,16 @@ function New-FabricAdlsConnection {
         credentialDetails = $credentialDetails
     }
 
-    Write-Log "Creating ADLS connection using type '$connectionType' and method '$creationMethodName'." 'DEBUG'
+    $desiredPathAliases = @(
+        $fullPathAbsolute,
+        $fullPathRelative,
+        $pathWithLeadingSlash,
+        "$accountHost/$fullPathRelative",
+        $fileSystemName
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
 
-    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
-    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
-
-    # Per https://learn.microsoft.com/en-us/rest/api/fabric/core/connections/create-connection
-    try {
-        $result = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $body -Description "Create ADLS Gen2 connection '$DisplayName'"
-    } catch {
-        $message = $_.Exception.Message
-        # Handle 409 DuplicateConnectionName - the connection may have been created by another process
-        if ($message -match '409|DuplicateConnectionName') {
-            Write-Log "Connection '$DisplayName' already exists (409 conflict). Attempting to retrieve existing connection..." 'WARN'
-            # Try to find the existing connection again
-            $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
-            if (-not $existingRetry) {
-                $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName
-            }
-            if ($existingRetry -and $existingRetry.PSObject.Properties['id']) {
-                $existingId = [string]$existingRetry.id
-                Write-Log "Found existing Fabric ADLS connection '$DisplayName' (ID: $existingId) after conflict." 'INFO'
-                return $existingId
-            }
-        }
-        Write-Log "Failed to create Fabric connection '$DisplayName': $message" 'ERROR'
-        throw
-    }
-
-    $response = $result.Response
-    if ($response -and $response.PSObject.Properties['id']) {
-        $connectionId = [string]$response.id
-        Write-Log "Created Fabric connection '$DisplayName' (ID: $connectionId)." 'INFO'
-        return $connectionId
-    }
-
-    throw "Fabric connection response did not include an identifier for '$DisplayName'."
+    Write-Log "Ensuring ADLS connection uses type '$connectionType' and method '$creationMethodName'." 'DEBUG'
+    return (Ensure-FabricConnection -Endpoint $Endpoint -WorkspaceId $WorkspaceId -AccessToken $AccessToken -DisplayName $DisplayName -DesiredBody $body -DesiredPathAliases $desiredPathAliases)
 }
 
 function Get-FabricShortcutByName {
@@ -2112,36 +2386,6 @@ function New-FabricImageShortcuts {
     }
 
     $blobEndpoint = "https://$BlobStorageAccountName.blob.core.windows.net"
-    $defaultContainer = $StmoDefinitions | Select-Object -First 1
-    $defaultContainerName = if ($defaultContainer -and $defaultContainer.PSObject.Properties['ContainerName']) { [string]$defaultContainer.ContainerName } else { $null }
-
-    # Blob connection for STMO image containers
-    $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName -WorkspaceId $WorkspaceId
-    if (-not $existingBlobConnection) {
-        $existingBlobConnection = Get-FabricConnectionByDisplayName -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName
-        if ($existingBlobConnection) {
-            Write-Log "Found tenant-scoped Fabric blob connection '$BlobConnectionDisplayName'." 'INFO'
-        }
-    }
-    if ($existingBlobConnection -and $existingBlobConnection.PSObject.Properties['id']) {
-        $connectionId = [string]$existingBlobConnection.id
-        Write-Log "Found existing Fabric blob connection '$BlobConnectionDisplayName' (ID: $connectionId)." 'INFO'
-
-        try {
-            if ($existingBlobConnection.PSObject.Properties['connectionDetails']) {
-                $connectionDetailsJson = $existingBlobConnection.connectionDetails | ConvertTo-Json -Depth 5 -Compress
-                Write-Log "Existing connection details: $connectionDetailsJson" 'DEBUG'
-            }
-        } catch {
-            Write-Log "Unable to serialize existing connection details for '$BlobConnectionDisplayName': $($_.Exception.Message)" 'DEBUG'
-        }
-    } else {
-        $connectionId = New-FabricBlobConnection -Endpoint $FabricEndpoint -WorkspaceId $WorkspaceId -AccessToken $FabricAccessToken -DisplayName $BlobConnectionDisplayName -StorageLocation $blobEndpoint -DefaultContainerName $defaultContainerName
-    }
-
-    if ([string]::IsNullOrWhiteSpace($connectionId)) {
-        throw "Unable to resolve a Fabric connection ID for '$BlobConnectionDisplayName'."
-    }
 
     # Resolve lakehouse segments once for folder verification
     $segments = Resolve-LakehouseSegments -WorkspaceId $WorkspaceId -LakehouseId $LakehouseId
@@ -2183,6 +2427,15 @@ function New-FabricImageShortcuts {
         if ($existingShortcut) {
             Write-Log "Image shortcut '$containerName' already exists at '$shortcutPath'." 'INFO'
         } else {
+            $imageConnectionDisplayName = "$BlobConnectionDisplayName-$containerName"
+            $imageConnectionId = New-FabricBlobConnection -Endpoint $FabricEndpoint -WorkspaceId $WorkspaceId -AccessToken $FabricAccessToken -DisplayName $imageConnectionDisplayName -StorageLocation $blobEndpoint -DefaultContainerName $containerName
+            if ([string]::IsNullOrWhiteSpace($imageConnectionId)) {
+                throw "Unable to resolve a Fabric connection ID for image shortcut '$containerName'."
+            }
+
+            Write-FabricShortcutDiagnostics -ShortcutName $containerName -ShortcutPath $shortcutPath -TargetType 'AzureBlobStorage' -Location $blobEndpoint -Subpath "/$containerName" -ConnectionId $imageConnectionId -ConnectionDisplayName $imageConnectionDisplayName
+            Write-FabricConnectionDiagnostics -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -ConnectionId $imageConnectionId -ContextLabel "Image shortcut '$containerName'"
+
             $body = @{
                 path = $shortcutPath
                 name = $containerName
@@ -2190,7 +2443,7 @@ function New-FabricImageShortcuts {
                     azureBlobStorage = @{
                         location = $blobEndpoint
                         subpath  = "/$containerName"
-                        connectionId = $connectionId
+                        connectionId = $imageConnectionId
                     }
                 }
             }
@@ -2217,6 +2470,7 @@ function New-FabricImageShortcuts {
                         }
                         # If 'Keep', we just continue without retrying
                     } else {
+                        Write-FabricConnectionDiagnostics -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -ConnectionId $imageConnectionId -ContextLabel "Image shortcut '$containerName' failure"
                         Write-Log "Failed to create image shortcut '$containerName': $errorMessage" 'ERROR'
                         throw
                     }
@@ -2235,6 +2489,15 @@ function New-FabricImageShortcuts {
         if ($existingInventoryShortcut) {
             Write-Log "Inventory shortcut '$inventoryShortcutName' already exists at '$inventoryShortcutPath'." 'INFO'
         } else {
+            $inventoryConnectionDisplayName = "$BlobConnectionDisplayName-$inventoryContainerName"
+            $inventoryConnectionId = New-FabricBlobConnection -Endpoint $FabricEndpoint -WorkspaceId $WorkspaceId -AccessToken $FabricAccessToken -DisplayName $inventoryConnectionDisplayName -StorageLocation $blobEndpoint -DefaultContainerName $inventoryContainerName
+            if ([string]::IsNullOrWhiteSpace($inventoryConnectionId)) {
+                throw "Unable to resolve a Fabric connection ID for inventory shortcut '$inventoryShortcutName'."
+            }
+
+            Write-FabricShortcutDiagnostics -ShortcutName $inventoryShortcutName -ShortcutPath $inventoryShortcutPath -TargetType 'AzureBlobStorage' -Location $blobEndpoint -Subpath "/$inventoryContainerName" -ConnectionId $inventoryConnectionId -ConnectionDisplayName $inventoryConnectionDisplayName
+            Write-FabricConnectionDiagnostics -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -ConnectionId $inventoryConnectionId -ContextLabel "Inventory shortcut '$inventoryShortcutName'"
+
             # Use the same blob connection as the image shortcuts (inventory is on the same blob storage account)
             $inventoryBody = @{
                 path = $inventoryShortcutPath
@@ -2243,7 +2506,7 @@ function New-FabricImageShortcuts {
                     azureBlobStorage = @{
                         location = $blobEndpoint
                         subpath  = "/$inventoryContainerName"
-                        connectionId = $connectionId
+                        connectionId = $inventoryConnectionId
                     }
                 }
             }
@@ -2270,6 +2533,7 @@ function New-FabricImageShortcuts {
                         }
                         # If 'Keep', we just continue without retrying
                     } else {
+                        Write-FabricConnectionDiagnostics -Endpoint $FabricEndpoint -AccessToken $FabricAccessToken -ConnectionId $inventoryConnectionId -ContextLabel "Inventory shortcut '$inventoryShortcutName' failure"
                         Write-Log "Failed to create inventory shortcut '$inventoryShortcutName': $errorMessage" 'ERROR'
                         throw
                     }

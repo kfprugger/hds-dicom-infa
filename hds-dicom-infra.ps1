@@ -905,66 +905,116 @@ function Invoke-FabricApiRequest {
         Write-Log "$logPrefix request body: $bodyPayload" 'DEBUG'
     }
 
-    try {
-        $invokeParams = @{
-            Method      = $Method
-            Uri         = $Uri
-            Headers     = $Headers
-            ErrorAction = 'Stop'
-        }
+    $maxRetries = 5
+    $retryAttempt = 0
 
-        if ($null -ne $bodyPayload) {
-            $invokeParams['Body'] = $bodyPayload
-            $invokeParams['ContentType'] = 'application/json'
-        }
+    while ($true) {
+        $retryAttempt++
+        $statusCode = $null
+        $responseHeaders = $null
 
-        $iwrCommand = Get-Command -Name Invoke-WebRequest -ErrorAction Stop
-        if ($iwrCommand.Parameters.ContainsKey('SkipHttpErrorCheck')) {
-            $invokeParams['SkipHttpErrorCheck'] = $true
-        }
-
-        $rawResponse = Invoke-WebRequest @invokeParams
-
-        $statusCode = if ($rawResponse.PSObject.Properties['StatusCode']) { [int]$rawResponse.StatusCode } else { -1 }
-        $responseHeaders = if ($rawResponse.PSObject.Properties['Headers']) { $rawResponse.Headers } else { $null }
-        $rawContent = if ($rawResponse.PSObject.Properties['Content']) { [string]$rawResponse.Content } else { '' }
-
-        if ($statusCode -lt 200 -or $statusCode -ge 300) {
-            $errorBody = if ([string]::IsNullOrWhiteSpace($rawContent)) { '<no-response-body>' } else { $rawContent }
-            $errorMessage = "$logPrefix failure: $Method $Uri returned status $statusCode ('<no-description>'). Message: $errorBody"
-            Write-Log $errorMessage 'ERROR'
-            throw [System.Net.Http.HttpRequestException]::new($errorMessage)
-        }
-
-        $statusLabel = [int]$statusCode
-        $successMessage = "$logPrefix response: $Method $Uri returned status $statusLabel."
-        Write-Log $successMessage 'INFO'
-
-        $parsedResponse = $null
-        if (-not [string]::IsNullOrWhiteSpace($rawContent)) {
-            try {
-                $parsedResponse = $rawContent | ConvertFrom-Json -Depth 50 -ErrorAction Stop
-            } catch {
-                $parsedResponse = $rawContent
+        try {
+            $invokeParams = @{
+                Method      = $Method
+                Uri         = $Uri
+                Headers     = $Headers
+                ErrorAction = 'Stop'
             }
-        }
 
-        return [pscustomobject]@{
-            Response   = $parsedResponse
-            StatusCode = $statusCode
-            Headers    = $responseHeaders
-            RawContent = $rawContent
-        }
-    } catch {
-        $caughtError = $_
-        if ($caughtError.Exception -and -not ($caughtError.Exception -is [System.Net.Http.HttpRequestException])) {
-            $errorMessage = "$logPrefix failure: $Method $Uri experienced an unexpected error: $($caughtError.Exception.Message)"
-        } else {
-            $errorMessage = $caughtError.Exception.Message
-        }
+            if ($null -ne $bodyPayload) {
+                $invokeParams['Body'] = $bodyPayload
+                $invokeParams['ContentType'] = 'application/json'
+            }
 
-        Write-Log $errorMessage 'ERROR'
-        throw
+            $iwrCommand = Get-Command -Name Invoke-WebRequest -ErrorAction Stop
+            if ($iwrCommand.Parameters.ContainsKey('SkipHttpErrorCheck')) {
+                $invokeParams['SkipHttpErrorCheck'] = $true
+            }
+
+            $rawResponse = Invoke-WebRequest @invokeParams
+
+            $statusCode = if ($rawResponse.PSObject.Properties['StatusCode']) { [int]$rawResponse.StatusCode } else { -1 }
+            $responseHeaders = if ($rawResponse.PSObject.Properties['Headers']) { $rawResponse.Headers } else { $null }
+            $rawContent = if ($rawResponse.PSObject.Properties['Content']) { [string]$rawResponse.Content } else { '' }
+
+            # Handle 429 (Too Many Requests) and 5xx with retry
+            if ($statusCode -eq 429 -or ($statusCode -ge 500 -and $statusCode -lt 600)) {
+                if ($retryAttempt -le $maxRetries) {
+                    $retryAfterSeconds = 0
+                    # Check Retry-After header
+                    if ($responseHeaders) {
+                        $retryAfterValue = $null
+                        if ($responseHeaders -is [System.Collections.IDictionary] -and $responseHeaders.ContainsKey('Retry-After')) {
+                            $retryAfterValue = [string]$responseHeaders['Retry-After']
+                        }
+                        if ($retryAfterValue -and [int]::TryParse($retryAfterValue, [ref]$retryAfterSeconds)) {
+                            # parsed as seconds
+                        } else {
+                            $retryAfterSeconds = 0
+                        }
+                    }
+
+                    # Parse the "blocked until" timestamp from the response body if no Retry-After header
+                    if ($retryAfterSeconds -le 0 -and -not [string]::IsNullOrWhiteSpace($rawContent) -and $rawContent -match 'until:\s*(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}\s+[AP]M)\s*\(UTC\)') {
+                        try {
+                            $blockedUntil = [DateTime]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+                            $retryAfterSeconds = [Math]::Max(1, [Math]::Ceiling(($blockedUntil - [DateTime]::UtcNow).TotalSeconds))
+                        } catch {
+                            $retryAfterSeconds = 0
+                        }
+                    }
+
+                    # Fallback: exponential backoff
+                    if ($retryAfterSeconds -le 0) {
+                        $retryAfterSeconds = [Math]::Min(60, [Math]::Pow(2, $retryAttempt))
+                    }
+
+                    # Cap at 120 seconds
+                    $retryAfterSeconds = [Math]::Min(120, $retryAfterSeconds)
+
+                    Write-Log "$logPrefix throttled (HTTP $statusCode) on attempt $retryAttempt of $maxRetries for $Method $Uri. Retrying in $retryAfterSeconds second(s)." 'WARN'
+                    Start-Sleep -Seconds $retryAfterSeconds
+                    continue
+                }
+            }
+
+            if ($statusCode -lt 200 -or $statusCode -ge 300) {
+                $errorBody = if ([string]::IsNullOrWhiteSpace($rawContent)) { '<no-response-body>' } else { $rawContent }
+                $errorMessage = "$logPrefix failure: $Method $Uri returned status $statusCode ('<no-description>'). Message: $errorBody"
+                Write-Log $errorMessage 'ERROR'
+                throw [System.Net.Http.HttpRequestException]::new($errorMessage)
+            }
+
+            $statusLabel = [int]$statusCode
+            $successMessage = "$logPrefix response: $Method $Uri returned status $statusLabel."
+            Write-Log $successMessage 'INFO'
+
+            $parsedResponse = $null
+            if (-not [string]::IsNullOrWhiteSpace($rawContent)) {
+                try {
+                    $parsedResponse = $rawContent | ConvertFrom-Json -Depth 50 -ErrorAction Stop
+                } catch {
+                    $parsedResponse = $rawContent
+                }
+            }
+
+            return [pscustomobject]@{
+                Response   = $parsedResponse
+                StatusCode = $statusCode
+                Headers    = $responseHeaders
+                RawContent = $rawContent
+            }
+        } catch {
+            $caughtError = $_
+            if ($caughtError.Exception -and -not ($caughtError.Exception -is [System.Net.Http.HttpRequestException])) {
+                $errorMessage = "$logPrefix failure: $Method $Uri experienced an unexpected error: $($caughtError.Exception.Message)"
+            } else {
+                $errorMessage = $caughtError.Exception.Message
+            }
+
+            Write-Log $errorMessage 'ERROR'
+            throw
+        }
     }
 }
 

@@ -1404,7 +1404,7 @@ function Get-FabricConnectionDriftReasons {
         $reasons += "skipTestConnection: existing '$existingSkipTestConnection', desired '$desiredSkipTestConnection'"
     }
 
-    return $reasons
+    return ,$reasons
 }
 
 function Ensure-FabricConnection {
@@ -1426,7 +1426,7 @@ function Ensure-FabricConnection {
     }
 
     if ($existing -and $existing.PSObject.Properties['id']) {
-        $driftReasons = Get-FabricConnectionDriftReasons -ExistingConnection $existing -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases
+        $driftReasons = @(Get-FabricConnectionDriftReasons -ExistingConnection $existing -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases)
         if ($driftReasons.Count -eq 0) {
             $existingId = [string]$existing.id
             Write-Log "Existing Fabric connection '$DisplayName' already matches the script-generated values. Reusing connection ID '$existingId'." 'INFO'
@@ -1463,7 +1463,7 @@ function Ensure-FabricConnection {
                 }
 
                 if ($existingRetry -and $existingRetry.PSObject.Properties['id']) {
-                    $driftReasons = Get-FabricConnectionDriftReasons -ExistingConnection $existingRetry -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases
+                    $driftReasons = @(Get-FabricConnectionDriftReasons -ExistingConnection $existingRetry -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases)
                     if ($driftReasons.Count -eq 0) {
                         $existingRetryId = [string]$existingRetry.id
                         Write-Log "Fabric connection '$DisplayName' now matches the script-generated values after conflict resolution. Reusing connection ID '$existingRetryId'." 'INFO'
@@ -1916,7 +1916,7 @@ function New-FabricBlobConnection {
                     $valueCandidate = ''
                 } elseif ($segments.Count -eq 1) {
                     $valueCandidate = $segments[0]
-                } elseif (($segments | Where-Object { $_.Length -gt 1 }).Count -gt 0) {
+                } elseif (@($segments | Where-Object { $_.Length -gt 1 }).Count -gt 0) {
                     $valueCandidate = [string]::Join('/', $segments)
                 } else {
                     $valueCandidate = -join $segments
@@ -2150,7 +2150,7 @@ function New-FabricAdlsConnection {
                     $valueCandidate = ''
                 } elseif ($segments.Count -eq 1) {
                     $valueCandidate = $segments[0]
-                } elseif (($segments | Where-Object { $_.Length -gt 1 }).Count -gt 0) {
+                } elseif (@($segments | Where-Object { $_.Length -gt 1 }).Count -gt 0) {
                     $valueCandidate = [string]::Join('/', $segments)
                 } else {
                     $valueCandidate = -join $segments

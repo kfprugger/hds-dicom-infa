@@ -1442,7 +1442,20 @@ function Ensure-FabricConnection {
     $headers = Get-FabricApiHeaders -AccessToken $AccessToken
     $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
 
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
+    # Deterministic workspace-derived suffix used to make the display name globally
+    # unique if a tenant-level connection with the same name exists but is not
+    # visible to the current principal via GET /v1/connections (e.g. owned by
+    # another user, orphaned, or soft-deleted). Fabric enforces global uniqueness
+    # of ShareableCloud connection display names per tenant, so this fallback is
+    # required to make progress when we cannot see/delete the colliding entry.
+    $workspaceSuffix = ($WorkspaceId -replace '-', '')
+    if ($workspaceSuffix.Length -gt 8) {
+        $workspaceSuffix = $workspaceSuffix.Substring(0, 8)
+    }
+    $originalDisplayName = $DisplayName
+    $usedUniqueSuffix = $false
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
             $result = Invoke-FabricApiRequest -Method 'Post' -Uri $uri -Headers $headers -Body $DesiredBody -Description "Create Fabric connection '$DisplayName'"
             $response = $result.Response
@@ -1455,7 +1468,7 @@ function Ensure-FabricConnection {
             throw "Fabric connection response did not include an identifier for '$DisplayName'."
         } catch {
             $message = $_.Exception.Message
-            if ($attempt -eq 1 -and $message -match '409|DuplicateConnectionName') {
+            if ($attempt -lt 3 -and $message -match '409|DuplicateConnectionName') {
                 Write-Log "Create for Fabric connection '$DisplayName' returned a duplicate-name conflict. Rechecking the existing connection before retrying." 'WARN'
                 $existingRetry = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $DisplayName -WorkspaceId $WorkspaceId
                 if (-not $existingRetry) {
@@ -1476,6 +1489,39 @@ function Ensure-FabricConnection {
                     Start-Sleep -Seconds 5
                     continue
                 }
+
+                # Server reports a duplicate but GET /v1/connections returned nothing
+                # for this display name. This means the colliding connection is not
+                # visible to (or manageable by) the current principal. Fall back to a
+                # deterministic unique display name derived from the workspace id so
+                # subsequent runs converge on the same connection.
+                if (-not $usedUniqueSuffix -and -not [string]::IsNullOrWhiteSpace($workspaceSuffix)) {
+                    $uniqueDisplayName = "$originalDisplayName-ws$workspaceSuffix"
+                    Write-Log "Fabric connection '$DisplayName' conflicts with an existing tenant-level connection that is not visible to this principal. Retrying with unique display name '$uniqueDisplayName'." 'WARN'
+
+                    $DisplayName = $uniqueDisplayName
+                    $DesiredBody.displayName = $uniqueDisplayName
+                    $usedUniqueSuffix = $true
+
+                    # Check whether the unique name already exists from a prior run
+                    # and is reusable, otherwise continue to POST with it.
+                    $existingUnique = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $uniqueDisplayName -WorkspaceId $WorkspaceId
+                    if (-not $existingUnique) {
+                        $existingUnique = Get-FabricConnectionByDisplayName -Endpoint $Endpoint -AccessToken $AccessToken -DisplayName $uniqueDisplayName
+                    }
+                    if ($existingUnique -and $existingUnique.PSObject.Properties['id']) {
+                        $driftReasons = @(Get-FabricConnectionDriftReasons -ExistingConnection $existingUnique -DesiredBody $DesiredBody -DesiredPathAliases $DesiredPathAliases)
+                        if ($driftReasons.Count -eq 0) {
+                            $existingUniqueId = [string]$existingUnique.id
+                            Write-Log "Reusing existing Fabric connection '$uniqueDisplayName' (ID: $existingUniqueId)." 'INFO'
+                            return $existingUniqueId
+                        }
+                        Write-Log "Existing Fabric connection '$uniqueDisplayName' differs from desired state: $($driftReasons -join '; '). Deleting before retry." 'WARN'
+                        Remove-FabricConnectionById -Endpoint $Endpoint -AccessToken $AccessToken -ConnectionId ([string]$existingUnique.id) -DisplayName $uniqueDisplayName
+                        Start-Sleep -Seconds 5
+                    }
+                    continue
+                }
             }
 
             Write-Log "Failed to create Fabric connection '$DisplayName': $message" 'ERROR'
@@ -1483,7 +1529,7 @@ function Ensure-FabricConnection {
         }
     }
 
-    throw "Unable to create Fabric connection '$DisplayName'."
+    throw "Unable to create Fabric connection '$originalDisplayName'."
 }
 
 function Get-AllFabricConnections {

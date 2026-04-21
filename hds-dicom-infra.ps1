@@ -1486,6 +1486,64 @@ function Ensure-FabricConnection {
     throw "Unable to create Fabric connection '$DisplayName'."
 }
 
+function Get-AllFabricConnections {
+    param(
+        [Parameter(Mandatory = $true)][string]$Endpoint,
+        [Parameter(Mandatory = $true)][string]$AccessToken
+    )
+
+    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
+    $baseUri = "$($Endpoint.TrimEnd('/'))/v1/connections"
+    $uri = $baseUri
+    $allItems = @()
+    $pageNumber = 0
+    $maxPages = 200
+
+    while (-not [string]::IsNullOrWhiteSpace($uri) -and $pageNumber -lt $maxPages) {
+        $pageNumber++
+        try {
+            $result = Invoke-FabricApiRequest -Method 'Get' -Uri $uri -Headers $headers -Description "List Fabric connections (page $pageNumber)"
+        } catch {
+            Write-Log "Unable to retrieve Fabric connections page ${pageNumber}: $($_.Exception.Message)" 'WARN'
+            break
+        }
+
+        $response = $result.Response
+        $pageItems = @()
+        if ($null -ne $response) {
+            if ($response.PSObject.Properties['value']) {
+                $pageItems = @($response.value)
+            } elseif ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
+                $pageItems = @($response)
+            } else {
+                $pageItems = @($response)
+            }
+        }
+
+        if ($pageItems.Count -gt 0) {
+            $allItems += $pageItems
+        }
+
+        $nextUri = $null
+        if ($null -ne $response) {
+            if ($response.PSObject.Properties['continuationUri'] -and -not [string]::IsNullOrWhiteSpace([string]$response.continuationUri)) {
+                $nextUri = [string]$response.continuationUri
+            } elseif ($response.PSObject.Properties['continuationToken'] -and -not [string]::IsNullOrWhiteSpace([string]$response.continuationToken)) {
+                $encodedToken = [Uri]::EscapeDataString([string]$response.continuationToken)
+                $nextUri = "${baseUri}?continuationToken=$encodedToken"
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($nextUri) -or $nextUri -eq $uri) {
+            break
+        }
+        $uri = $nextUri
+    }
+
+    Write-Log "Retrieved $($allItems.Count) Fabric connection(s) across $pageNumber page(s)." 'DEBUG'
+    return ,$allItems
+}
+
 function Get-FabricConnectionByDisplayName {
     param(
         [Parameter(Mandatory = $true)][string]$Endpoint,
@@ -1494,27 +1552,7 @@ function Get-FabricConnectionByDisplayName {
         [string]$WorkspaceId
     )
 
-    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
-    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
-
-    try {
-        $result = Invoke-FabricApiRequest -Method 'Get' -Uri $uri -Headers $headers -Description 'List Fabric connections'
-    } catch {
-        Write-Log "Unable to retrieve Fabric connections for display name lookup: $($_.Exception.Message)" 'WARN'
-        return $null
-    }
-
-    $response = $result.Response
-    $items = @()
-    if ($null -ne $response) {
-        if ($response.PSObject.Properties['value']) {
-            $items = @($response.value)
-        } elseif ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
-            $items = @($response)
-        } else {
-            $items = @($response)
-        }
-    }
+    $items = Get-AllFabricConnections -Endpoint $Endpoint -AccessToken $AccessToken
 
     foreach ($item in $items) {
         $nameMatches = $item.PSObject.Properties['displayName'] -and $item.displayName -eq $DisplayName
@@ -1555,28 +1593,7 @@ function Get-FabricConnectionById {
         [Parameter(Mandatory = $true)][string]$ConnectionId
     )
 
-    $headers = Get-FabricApiHeaders -AccessToken $AccessToken
-    $uri = "$($Endpoint.TrimEnd('/'))/v1/connections"
-
-    try {
-        $result = Invoke-FabricApiRequest -Method 'Get' -Uri $uri -Headers $headers -Description 'List Fabric connections for connection ID lookup'
-    } catch {
-        Write-Log "Unable to retrieve Fabric connections for connection ID lookup: $($_.Exception.Message)" 'WARN'
-        return $null
-    }
-
-    $response = $result.Response
-    $items = @()
-    if ($null -ne $response) {
-        if ($response.PSObject.Properties['value']) {
-            $items = @($response.value)
-        } elseif ($response -is [System.Collections.IEnumerable] -and -not ($response -is [string])) {
-            $items = @($response)
-        } else {
-            $items = @($response)
-        }
-    }
-
+    $items = Get-AllFabricConnections -Endpoint $Endpoint -AccessToken $AccessToken
     return ($items | Where-Object { $_.PSObject.Properties['id'] -and $_.id -eq $ConnectionId } | Select-Object -First 1)
 }
 

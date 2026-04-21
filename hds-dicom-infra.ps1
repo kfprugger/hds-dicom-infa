@@ -1282,7 +1282,7 @@ function Remove-FabricConnectionById {
     $uri = "$($Endpoint.TrimEnd('/'))/v1/connections/$connectionIdEncoded"
 
     try {
-        Invoke-FabricApiRequest -Method 'Delete' -Uri $uri -Headers $headers -Description "Delete Fabric connection '$DisplayName'"
+        Invoke-FabricApiRequest -Method 'Delete' -Uri $uri -Headers $headers -Description "Delete Fabric connection '$DisplayName'" | Out-Null
         Write-Log "Deleted Fabric connection '$DisplayName' (ID: $ConnectionId)." 'INFO'
     } catch {
         $message = $_.Exception.Message
@@ -1404,7 +1404,7 @@ function Get-FabricConnectionDriftReasons {
         $reasons += "skipTestConnection: existing '$existingSkipTestConnection', desired '$desiredSkipTestConnection'"
     }
 
-    return ,$reasons
+    return $reasons
 }
 
 function Ensure-FabricConnection {
